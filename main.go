@@ -201,20 +201,21 @@ var (
 	previewRole  = lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Bold(true)
 	previewUser  = lipgloss.NewStyle().Foreground(lipgloss.Color("223"))
 	previewAsst  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	highlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("178")).Foreground(lipgloss.Color("0"))
 )
 
-func formatConversation(msgs []chatMessage) string {
+func formatConversation(msgs []chatMessage, terms []string) string {
 	var b strings.Builder
 	for _, m := range msgs {
 		text := normalizeText(m.content)
 		if m.role == "user" {
 			b.WriteString(previewRole.Render("You:"))
 			b.WriteString("\n")
-			b.WriteString(previewUser.Render(text))
+			b.WriteString(highlightTerms(previewUser.Render(text), terms))
 		} else {
 			b.WriteString(previewRole.Render("Claude:"))
 			b.WriteString("\n")
-			b.WriteString(previewAsst.Render(text))
+			b.WriteString(highlightTerms(previewAsst.Render(text), terms))
 		}
 		b.WriteString("\n\n")
 	}
@@ -230,6 +231,76 @@ func normalizeText(s string) string {
 		lines[i] = strings.TrimLeft(line, " \t")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func highlightTerms(text string, terms []string) string {
+	if len(terms) == 0 {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = highlightLine(line, terms)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func highlightLine(line string, terms []string) string {
+	if line == "" {
+		return line
+	}
+	lower := strings.ToLower(line)
+
+	type span struct{ start, end int }
+	var spans []span
+	for _, term := range terms {
+		tl := strings.ToLower(term)
+		offset := 0
+		for {
+			idx := strings.Index(lower[offset:], tl)
+			if idx < 0 {
+				break
+			}
+			s := offset + idx
+			spans = append(spans, span{s, s + len(tl)})
+			offset = s + 1
+		}
+	}
+
+	if len(spans) == 0 {
+		return line
+	}
+
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start == spans[j].start {
+			return spans[i].end > spans[j].end
+		}
+		return spans[i].start < spans[j].start
+	})
+	merged := []span{spans[0]}
+	for _, s := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if s.start <= last.end {
+			if s.end > last.end {
+				last.end = s.end
+			}
+		} else {
+			merged = append(merged, s)
+		}
+	}
+
+	var b strings.Builder
+	pos := 0
+	for _, s := range merged {
+		if s.start > pos {
+			b.WriteString(line[pos:s.start])
+		}
+		b.WriteString(highlightStyle.Render(line[s.start:s.end]))
+		pos = s.end
+	}
+	if pos < len(line) {
+		b.WriteString(line[pos:])
+	}
+	return b.String()
 }
 
 func relativeTime(t time.Time) string {
@@ -606,15 +677,12 @@ func (m *model) updateViewer() {
 		m.selectedIdx = -1
 		return
 	}
-	// Find the session that matches this row's title
 	title := row[0]
 	for i, s := range m.sessions {
 		if s.title == title {
-			if m.selectedIdx != i {
-				m.selectedIdx = i
-				m.viewer.SetContent(formatConversation(s.messages))
-				m.viewer.GotoTop()
-			}
+			m.selectedIdx = i
+			m.viewer.SetContent(formatConversation(s.messages, m.matchedTerms))
+			m.viewer.GotoTop()
 			return
 		}
 	}
