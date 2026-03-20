@@ -1,0 +1,55 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check if version is newer than latest tag
+        id: check
+        run: |
+          VERSION=$(grep '^VERSION' Makefile | sed 's/.*?= *//')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          LATEST=$(git tag --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "No existing tags, will publish $VERSION"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Makefile version: $VERSION"
+          echo "Latest tag: $LATEST"
+
+          verlte() { [ "$1" = "$(echo -e "$1\n$2" | sort -V | head -1)" ]; }
+          if verlte "$VERSION" "$LATEST"; then
+            echo "Version $VERSION is not newer than $LATEST, skipping"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION is newer than $LATEST, will publish"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and publish
+        if: steps.check.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          ./publish.sh "$VERSION"
