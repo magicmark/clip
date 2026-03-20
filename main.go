@@ -71,6 +71,7 @@ type model struct {
 	index        bleve.Index
 	matchedIDs   map[string]bool
 	matchedTerms []string
+
 }
 
 func loadSessions() []session {
@@ -460,16 +461,12 @@ func searchSessions(idx bleve.Index, query string) (map[string]bool, []string) {
 	return matchedIDs, matchedTerms
 }
 
+type indexReadyMsg struct {
+	index bleve.Index
+}
+
 func initialModel() model {
 	sessions := loadSessions()
-
-	idx, err := openOrCreateIndex()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: search index unavailable: %v\n", err)
-	}
-	if idx != nil {
-		syncIndex(idx, sessions)
-	}
 
 	columns := []table.Column{
 		{Title: "Title", Width: 40},
@@ -522,7 +519,6 @@ func initialModel() model {
 		allRows:     rows,
 		focus:       focusSearch,
 		selectedIdx: -1,
-		index:       idx,
 	}
 }
 
@@ -542,12 +538,28 @@ var (
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	return func() tea.Msg {
+		idx, err := openOrCreateIndex()
+		if err != nil {
+			return indexReadyMsg{}
+		}
+		syncIndex(idx, m.sessions)
+		return indexReadyMsg{index: idx}
+	}
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case indexReadyMsg:
+		m.index = msg.index
+		if m.search.Value() != "" {
+			m.filterRows()
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
