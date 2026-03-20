@@ -1,14 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -16,129 +23,247 @@ import (
 const (
 	focusSearch = iota
 	focusTable
-	focusEditor
+	focusViewer
 )
 
+type session struct {
+	path      string
+	title     string
+	directory string
+	turns     int
+	date      time.Time
+	messages  []chatMessage
+}
+
+type chatMessage struct {
+	role    string
+	content string
+}
+
+type jsonlRecord struct {
+	Type      string    `json:"type"`
+	Timestamp string    `json:"timestamp"`
+	CWD       string    `json:"cwd"`
+	Message   *msgField `json:"message"`
+}
+
+type msgField struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
 type model struct {
-	search  textinput.Model
-	table   table.Model
-	editor  textarea.Model
-	allRows []table.Row
-	focus   int
-	width   int
-	height  int
-	ready   bool
+	search      textinput.Model
+	table       table.Model
+	viewer      viewport.Model
+	sessions    []session
+	allRows     []table.Row
+	focus       int
+	width       int
+	height      int
+	ready       bool
+	selectedIdx int
+}
+
+func loadSessions() []session {
+	home, _ := os.UserHomeDir()
+	base := filepath.Join(home, ".claude", "projects")
+
+	var files []string
+	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if strings.Contains(path, "/subagent") {
+			return filepath.SkipDir
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	var sessions []session
+	for _, f := range files {
+		s := parseSession(f)
+		if s.title != "" {
+			sessions = append(sessions, s)
+		}
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].date.After(sessions[j].date)
+	})
+
+	return sessions
+}
+
+func parseSession(path string) session {
+	f, err := os.Open(path)
+	if err != nil {
+		return session{}
+	}
+	defer f.Close()
+
+	s := session{path: path}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	for scanner.Scan() {
+		var rec jsonlRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+
+		if rec.CWD != "" && s.directory == "" {
+			s.directory = rec.CWD
+		}
+
+		if rec.Timestamp != "" {
+			if t, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
+				if t.After(s.date) {
+					s.date = t
+				}
+			}
+		}
+
+		if rec.Type != "user" && rec.Type != "assistant" {
+			continue
+		}
+		if rec.Message == nil {
+			continue
+		}
+
+		text := extractText(rec.Message.Content)
+		if text == "" {
+			continue
+		}
+
+		if rec.Message.Role == "user" {
+			s.turns++
+			if s.title == "" {
+				s.title = truncate(text, 120)
+			}
+		}
+
+		s.messages = append(s.messages, chatMessage{
+			role:    rec.Message.Role,
+			content: text,
+		})
+	}
+
+	return s
+}
+
+func extractText(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				if m["type"] == "text" {
+					if t, ok := m["text"].(string); ok {
+						parts = append(parts, t)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
+}
+
+func truncate(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
+}
+
+var multiNewline = regexp.MustCompile(`\n{3,}`)
+
+func formatConversation(msgs []chatMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.role == "user" {
+			b.WriteString(">>> USER:\n")
+		} else {
+			b.WriteString("<<< ASSISTANT:\n")
+		}
+		text := normalizeText(m.content)
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	return b.String()
+}
+
+func normalizeText(s string) string {
+	// Collapse 3+ newlines into 2
+	s = multiNewline.ReplaceAllString(s, "\n\n")
+	// Remove leading whitespace from each line
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func relativeTime(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(math.Round(d.Minutes()))
+		if m == 1 {
+			return "1 min ago"
+		}
+		return fmt.Sprintf("%d mins ago", m)
+	case d < 24*time.Hour:
+		h := int(math.Round(d.Hours()))
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	default:
+		days := int(math.Round(d.Hours() / 24))
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	}
+}
+
+func shortenDir(dir string) string {
+	home, _ := os.UserHomeDir()
+	if strings.HasPrefix(dir, home) {
+		return "~" + dir[len(home):]
+	}
+	return dir
 }
 
 func initialModel() model {
+	sessions := loadSessions()
+
 	columns := []table.Column{
-		{Title: "Rank", Width: 4},
-		{Title: "City", Width: 10},
-		{Title: "Country", Width: 10},
-		{Title: "Population", Width: 10},
+		{Title: "Title", Width: 40},
+		{Title: "Directory", Width: 20},
+		{Title: "Turns", Width: 5},
+		{Title: "Date", Width: 12},
 	}
 
-	rows := []table.Row{
-		{"1", "Tokyo", "Japan", "37,274,000"},
-		{"2", "Delhi", "India", "32,065,760"},
-		{"3", "Shanghai", "China", "28,516,904"},
-		{"4", "Dhaka", "Bangladesh", "22,478,116"},
-		{"5", "São Paulo", "Brazil", "22,429,800"},
-		{"6", "Mexico City", "Mexico", "22,085,140"},
-		{"7", "Cairo", "Egypt", "21,750,020"},
-		{"8", "Beijing", "China", "21,333,332"},
-		{"9", "Mumbai", "India", "20,961,472"},
-		{"10", "Osaka", "Japan", "19,059,856"},
-		{"11", "Chongqing", "China", "16,874,740"},
-		{"12", "Karachi", "Pakistan", "16,839,950"},
-		{"13", "Istanbul", "Turkey", "15,636,243"},
-		{"14", "Kinshasa", "DR Congo", "15,628,085"},
-		{"15", "Lagos", "Nigeria", "15,387,639"},
-		{"16", "Buenos Aires", "Argentina", "15,369,919"},
-		{"17", "Kolkata", "India", "15,133,888"},
-		{"18", "Manila", "Philippines", "14,406,059"},
-		{"19", "Tianjin", "China", "14,011,828"},
-		{"20", "Guangzhou", "China", "13,964,637"},
-		{"21", "Rio De Janeiro", "Brazil", "13,634,274"},
-		{"22", "Lahore", "Pakistan", "13,541,764"},
-		{"23", "Bangalore", "India", "13,193,035"},
-		{"24", "Shenzhen", "China", "12,831,330"},
-		{"25", "Moscow", "Russia", "12,640,818"},
-		{"26", "Chennai", "India", "11,503,293"},
-		{"27", "Bogota", "Colombia", "11,344,312"},
-		{"28", "Paris", "France", "11,142,303"},
-		{"29", "Jakarta", "Indonesia", "11,074,811"},
-		{"30", "Lima", "Peru", "11,044,607"},
-		{"31", "Bangkok", "Thailand", "10,899,698"},
-		{"32", "Hyderabad", "India", "10,534,418"},
-		{"33", "Seoul", "South Korea", "9,975,709"},
-		{"34", "Nagoya", "Japan", "9,571,596"},
-		{"35", "London", "United Kingdom", "9,540,576"},
-		{"36", "Chengdu", "China", "9,478,521"},
-		{"37", "Nanjing", "China", "9,429,381"},
-		{"38", "Tehran", "Iran", "9,381,546"},
-		{"39", "Ho Chi Minh City", "Vietnam", "9,077,158"},
-		{"40", "Luanda", "Angola", "8,952,496"},
-		{"41", "Wuhan", "China", "8,591,611"},
-		{"42", "Xi An Shaanxi", "China", "8,537,646"},
-		{"43", "Ahmedabad", "India", "8,450,228"},
-		{"44", "Kuala Lumpur", "Malaysia", "8,419,566"},
-		{"45", "New York City", "United States", "8,177,020"},
-		{"46", "Hangzhou", "China", "8,044,878"},
-		{"47", "Surat", "India", "7,784,276"},
-		{"48", "Suzhou", "China", "7,764,499"},
-		{"49", "Hong Kong", "Hong Kong", "7,643,256"},
-		{"50", "Riyadh", "Saudi Arabia", "7,538,200"},
-		{"51", "Shenyang", "China", "7,527,975"},
-		{"52", "Baghdad", "Iraq", "7,511,920"},
-		{"53", "Dongguan", "China", "7,511,851"},
-		{"54", "Foshan", "China", "7,497,263"},
-		{"55", "Dar Es Salaam", "Tanzania", "7,404,689"},
-		{"56", "Pune", "India", "6,987,077"},
-		{"57", "Santiago", "Chile", "6,856,939"},
-		{"58", "Madrid", "Spain", "6,713,557"},
-		{"59", "Haerbin", "China", "6,665,951"},
-		{"60", "Toronto", "Canada", "6,312,974"},
-		{"61", "Belo Horizonte", "Brazil", "6,194,292"},
-		{"62", "Khartoum", "Sudan", "6,160,327"},
-		{"63", "Johannesburg", "South Africa", "6,065,354"},
-		{"64", "Singapore", "Singapore", "6,039,577"},
-		{"65", "Dalian", "China", "5,930,140"},
-		{"66", "Qingdao", "China", "5,865,232"},
-		{"67", "Zhengzhou", "China", "5,690,312"},
-		{"68", "Ji Nan Shandong", "China", "5,663,015"},
-		{"69", "Barcelona", "Spain", "5,658,472"},
-		{"70", "Saint Petersburg", "Russia", "5,535,556"},
-		{"71", "Abidjan", "Ivory Coast", "5,515,790"},
-		{"72", "Yangon", "Myanmar", "5,514,454"},
-		{"73", "Fukuoka", "Japan", "5,502,591"},
-		{"74", "Alexandria", "Egypt", "5,483,605"},
-		{"75", "Guadalajara", "Mexico", "5,339,583"},
-		{"76", "Ankara", "Turkey", "5,309,690"},
-		{"77", "Chittagong", "Bangladesh", "5,252,842"},
-		{"78", "Addis Ababa", "Ethiopia", "5,227,794"},
-		{"79", "Melbourne", "Australia", "5,150,766"},
-		{"80", "Nairobi", "Kenya", "5,118,844"},
-		{"81", "Hanoi", "Vietnam", "5,067,352"},
-		{"82", "Sydney", "Australia", "5,056,571"},
-		{"83", "Monterrey", "Mexico", "5,036,535"},
-		{"84", "Changsha", "China", "4,809,887"},
-		{"85", "Brasilia", "Brazil", "4,803,877"},
-		{"86", "Cape Town", "South Africa", "4,800,954"},
-		{"87", "Jiddah", "Saudi Arabia", "4,780,740"},
-		{"88", "Urumqi", "China", "4,710,203"},
-		{"89", "Kunming", "China", "4,657,381"},
-		{"90", "Changchun", "China", "4,616,002"},
-		{"91", "Hefei", "China", "4,496,456"},
-		{"92", "Shantou", "China", "4,490,411"},
-		{"93", "Xinbei", "Taiwan", "4,470,672"},
-		{"94", "Kabul", "Afghanistan", "4,457,882"},
-		{"95", "Ningbo", "China", "4,405,292"},
-		{"96", "Tel Aviv", "Israel", "4,343,584"},
-		{"97", "Yaounde", "Cameroon", "4,336,670"},
-		{"98", "Rome", "Italy", "4,297,877"},
-		{"99", "Shijiazhuang", "China", "4,285,135"},
-		{"100", "Montreal", "Canada", "4,276,526"},
+	rows := make([]table.Row, len(sessions))
+	for i, s := range sessions {
+		rows[i] = table.Row{
+			s.title,
+			shortenDir(s.directory),
+			fmt.Sprintf("%d", s.turns),
+			relativeTime(s.date),
+		}
 	}
 
 	t := table.New(
@@ -160,22 +285,22 @@ func initialModel() model {
 		Bold(false)
 	t.SetStyles(s)
 
-	ta := textarea.New()
-	ta.Placeholder = "Write something..."
-	ta.ShowLineNumbers = false
+	vp := viewport.New()
+	vp.Style = lipgloss.NewStyle()
 
 	si := textinput.New()
 	si.Prompt = " / "
-	si.Placeholder = "Filter cities..."
-	// Unbind tab from accepting suggestions so it can switch panes
+	si.Placeholder = "Filter sessions..."
 	si.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
 
 	return model{
-		search:  si,
-		table:   t,
-		editor:  ta,
-		allRows: rows,
-		focus:   focusSearch,
+		search:      si,
+		table:       t,
+		viewer:      vp,
+		sessions:    sessions,
+		allRows:     rows,
+		focus:       focusSearch,
+		selectedIdx: -1,
 	}
 }
 
@@ -195,9 +320,7 @@ var (
 	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
-func (m model) Init() tea.Cmd {
-	return nil
-}
+func (m model) Init() tea.Cmd { return nil }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -220,6 +343,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			if m.focus != focusSearch {
+				return m, tea.Quit
+			}
 		case "tab":
 			m.focus = (m.focus + 1) % 3
 			m.applyFocus(&cmds)
@@ -253,12 +380,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterRows()
 		}
 	case focusTable:
+		prevCursor := m.table.Cursor()
 		var cmd tea.Cmd
 		m.table, cmd = m.table.Update(msg)
 		cmds = append(cmds, cmd)
-	case focusEditor:
+		if m.table.Cursor() != prevCursor {
+			m.updateViewer()
+		}
+	case focusViewer:
 		var cmd tea.Cmd
-		m.editor, cmd = m.editor.Update(msg)
+		m.viewer, cmd = m.viewer.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -267,7 +398,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) applyFocus(cmds *[]tea.Cmd) {
 	m.search.Blur()
-	m.editor.Blur()
 	m.table.Blur()
 
 	switch m.focus {
@@ -275,8 +405,30 @@ func (m *model) applyFocus(cmds *[]tea.Cmd) {
 		*cmds = append(*cmds, m.search.Focus())
 	case focusTable:
 		m.table.Focus()
-	case focusEditor:
-		*cmds = append(*cmds, m.editor.Focus())
+		m.updateViewer()
+	case focusViewer:
+		// viewport doesn't have focus/blur
+	}
+}
+
+func (m *model) updateViewer() {
+	row := m.table.SelectedRow()
+	if row == nil {
+		m.viewer.SetContent("")
+		m.selectedIdx = -1
+		return
+	}
+	// Find the session that matches this row's title
+	title := row[0]
+	for i, s := range m.sessions {
+		if s.title == title {
+			if m.selectedIdx != i {
+				m.selectedIdx = i
+				m.viewer.SetContent(formatConversation(s.messages))
+				m.viewer.GotoTop()
+			}
+			return
+		}
 	}
 }
 
@@ -288,7 +440,7 @@ func (m *model) filterRows() {
 	}
 	var filtered []table.Row
 	for _, row := range m.allRows {
-		if strings.Contains(strings.ToLower(row[1]), query) {
+		if strings.Contains(strings.ToLower(row[0]), query) {
 			filtered = append(filtered, row)
 		}
 	}
@@ -299,39 +451,41 @@ func (m *model) updateSizes() {
 	if !m.ready {
 		return
 	}
-	// Layout: search bar (3 rows with border) + panes + help (1 row)
 	searchHeight := 3
 	contentHeight := m.height - searchHeight - 1
 
 	halfWidth := m.width / 2
 
-	m.search.SetWidth(m.width - 6) // account for border + prompt
+	m.search.SetWidth(m.width - 6)
 
-	// Table: left half (border adds 2)
+	// Table: left half
 	tableInner := halfWidth - 2
 	m.table.SetWidth(tableInner)
 	m.table.SetHeight(contentHeight - 2)
 
-	// Distribute column widths to fill the table
+	// Distribute column widths: Title gets the lion's share
 	cols := m.table.Columns()
-	if len(cols) > 0 {
-		gap := len(cols) + 1 // table adds 1-char gaps between columns and edges
+	if len(cols) == 4 {
+		gap := len(cols) + 1
 		available := tableInner - gap
-		each := available / len(cols)
-		remainder := available % len(cols)
-		for i := range cols {
-			cols[i].Width = each
-			if i < remainder {
-				cols[i].Width++
-			}
-		}
+		// Fixed widths for Turns and Date
+		turnsW := 5
+		dateW := 12
+		dirW := available / 4
+		titleW := available - turnsW - dateW - dirW
+		cols[0].Width = titleW
+		cols[1].Width = dirW
+		cols[2].Width = turnsW
+		cols[3].Width = dateW
 		m.table.SetColumns(cols)
 	}
 
-	// Editor: right half (border adds 2)
-	editorWidth := m.width - halfWidth - 2
-	m.editor.SetWidth(editorWidth)
-	m.editor.SetHeight(contentHeight - 2)
+	// Viewer: right half
+	viewerWidth := m.width - halfWidth - 2
+	m.viewer.SetWidth(viewerWidth)
+	m.viewer.SetHeight(contentHeight - 2)
+
+	m.updateViewer()
 }
 
 func (m model) View() tea.View {
@@ -350,22 +504,23 @@ func (m model) View() tea.View {
 
 	// Panes
 	var leftBorder, rightBorder lipgloss.Style
-	if m.focus == focusTable {
+	switch m.focus {
+	case focusTable:
 		leftBorder = activeBorder
 		rightBorder = inactiveBorder
-	} else if m.focus == focusEditor {
+	case focusViewer:
 		leftBorder = inactiveBorder
 		rightBorder = activeBorder
-	} else {
+	default:
 		leftBorder = inactiveBorder
 		rightBorder = inactiveBorder
 	}
 
 	left := leftBorder.Render(m.table.View())
-	right := rightBorder.Render(m.editor.View())
+	right := rightBorder.Render(m.viewer.View())
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	help := helpStyle.Render("  tab: switch pane • /: search • ctrl+c: quit")
+	help := helpStyle.Render("  tab: switch pane • ↑/↓: navigate • ctrl+c: quit")
 
 	v := tea.NewView(searchBar + "\n" + panes + "\n" + help)
 	v.AltScreen = true
