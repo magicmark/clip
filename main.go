@@ -201,9 +201,10 @@ var (
 	highlightColor = lipgloss.Color("#b58900") // solarized yellow
 	multiNewline   = regexp.MustCompile(`\n{3,}`)
 	hrRule         = regexp.MustCompile(`\n---\n`)
-	previewRole    = lipgloss.NewStyle().Foreground(lipgloss.Color("#6c71c4")).Bold(true) // solarized violet
-	previewUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("#839496"))            // solarized base0
-	previewAsst    = lipgloss.NewStyle().Foreground(lipgloss.Color("#586e75"))            // solarized base01
+	previewYou     = lipgloss.NewStyle().Foreground(lipgloss.Color("#2aa198")).Bold(true) // cyan for "You:"
+	previewClaude  = lipgloss.NewStyle().Foreground(lipgloss.Color("#6c71c4")).Bold(true) // violet for "Claude:"
+	previewUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("#eee8d5"))            // solarized base2
+	previewAsst    = lipgloss.NewStyle().Foreground(lipgloss.Color("#93a1a1"))            // solarized base1
 	highlightStyle = lipgloss.NewStyle().Background(highlightColor).Foreground(lipgloss.Color("#002b36")) // base03 on yellow
 )
 
@@ -212,11 +213,11 @@ func formatConversation(msgs []chatMessage, terms []string) string {
 	for _, m := range msgs {
 		text := normalizeText(m.content)
 		if m.role == "user" {
-			b.WriteString(previewRole.Render("You:"))
+			b.WriteString(previewYou.Render("You:"))
 			b.WriteString("\n")
 			b.WriteString(styledHighlight(text, terms, previewUser))
 		} else {
-			b.WriteString(previewRole.Render("Claude:"))
+			b.WriteString(previewClaude.Render("Claude:"))
 			b.WriteString("\n")
 			b.WriteString(styledHighlight(text, terms, previewAsst))
 		}
