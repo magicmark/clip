@@ -13,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blevesearch/bleve/v2"
+	index "github.com/blevesearch/bleve_index_api"
+
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textinput"
@@ -63,8 +66,11 @@ type model struct {
 	focus       int
 	width       int
 	height      int
-	ready       bool
-	selectedIdx int
+	ready        bool
+	selectedIdx  int
+	index        bleve.Index
+	matchedIDs   map[string]bool
+	matchedTerms []string
 }
 
 func loadSessions() []session {
@@ -258,6 +264,129 @@ func shortenDir(dir string) string {
 		return "~" + dir[len(home):]
 	}
 	return dir
+}
+
+type sessionDoc struct {
+	Title   string `json:"title"`
+	Dir     string `json:"directory"`
+	Content string `json:"content"`
+	Path    string `json:"path"`
+	ModTime string `json:"mod_time"`
+}
+
+func openOrCreateIndex() (bleve.Index, error) {
+	home, _ := os.UserHomeDir()
+	indexPath := filepath.Join(home, ".cache", "clips", "search.index")
+
+	idx, err := bleve.Open(indexPath)
+	if err == bleve.ErrorIndexPathDoesNotExist {
+		os.MkdirAll(filepath.Dir(indexPath), 0755)
+		mapping := bleve.NewIndexMapping()
+		idx, err = bleve.New(indexPath, mapping)
+		if err != nil {
+			return nil, err
+		}
+		return idx, nil
+	}
+	return idx, err
+}
+
+func syncIndex(idx bleve.Index, sessions []session) {
+	currentIDs := make(map[string]bool)
+	for _, s := range sessions {
+		currentIDs[s.id] = true
+	}
+
+	for _, s := range sessions {
+		info, err := os.Stat(s.path)
+		if err != nil {
+			continue
+		}
+		modTime := info.ModTime().Format(time.RFC3339)
+
+		doc, err := idx.Document(s.id)
+		if err == nil && doc != nil {
+			var existingModTime string
+			doc.VisitFields(func(f index.Field) {
+				if f.Name() == "mod_time" {
+					existingModTime = string(f.Value())
+				}
+			})
+			if existingModTime == modTime {
+				continue
+			}
+		}
+
+		var content strings.Builder
+		for _, m := range s.messages {
+			if m.role == "user" {
+				content.WriteString("You: ")
+			} else {
+				content.WriteString("Claude: ")
+			}
+			content.WriteString(m.content)
+			content.WriteString("\n")
+		}
+
+		idx.Index(s.id, sessionDoc{
+			Title:   s.title,
+			Dir:     s.directory,
+			Content: content.String(),
+			Path:    s.path,
+			ModTime: modTime,
+		})
+	}
+
+	q := bleve.NewMatchAllQuery()
+	req := bleve.NewSearchRequest(q)
+	req.Size = 10000
+	req.Fields = []string{}
+	results, err := idx.Search(req)
+	if err != nil {
+		return
+	}
+	for _, hit := range results.Hits {
+		if !currentIDs[hit.ID] {
+			idx.Delete(hit.ID)
+		}
+	}
+}
+
+func searchSessions(idx bleve.Index, query string) (map[string]bool, []string) {
+	matchedIDs := make(map[string]bool)
+	var matchedTerms []string
+
+	q := bleve.NewQueryStringQuery(query)
+	req := bleve.NewSearchRequest(q)
+	req.Size = 10000
+	req.Fields = []string{"title", "content"}
+	req.Highlight = bleve.NewHighlight()
+
+	results, err := idx.Search(req)
+	if err != nil {
+		return matchedIDs, matchedTerms
+	}
+
+	termSet := make(map[string]bool)
+	for _, hit := range results.Hits {
+		matchedIDs[hit.ID] = true
+		for _, fragments := range hit.Fragments {
+			for _, frag := range fragments {
+				parts := strings.Split(frag, "<mark>")
+				for i := 1; i < len(parts); i++ {
+					if end := strings.Index(parts[i], "</mark>"); end >= 0 {
+						term := parts[i][:end]
+						termSet[strings.ToLower(term)] = true
+					}
+				}
+			}
+		}
+	}
+
+	for term := range termSet {
+		matchedTerms = append(matchedTerms, term)
+	}
+	return matchedIDs, matchedTerms
 }
 
 func initialModel() model {
