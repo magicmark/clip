@@ -71,7 +71,6 @@ type model struct {
 	index        bleve.Index
 	matchedIDs   map[string]bool
 	matchedTerms []string
-
 }
 
 func loadSessions() []session {
@@ -151,6 +150,8 @@ func parseSession(path string) session {
 			continue
 		}
 
+		text = stripSkillContent(text)
+
 		if rec.Message.Role == "user" {
 			s.turns++
 			if s.title == "" {
@@ -196,6 +197,21 @@ func truncate(s string, max int) string {
 	return s
 }
 
+var skillPrefix = "Base directory for this skill: "
+
+func stripSkillContent(text string) string {
+	if strings.HasPrefix(text, skillPrefix) {
+		// Extract the skill path from the first line
+		firstNewline := strings.Index(text, "\n")
+		if firstNewline < 0 {
+			return text
+		}
+		path := strings.TrimPrefix(text[:firstNewline], skillPrefix)
+		return "<skill loaded: " + filepath.Base(path) + ">"
+	}
+	return text
+}
+
 var (
 	accent         = lipgloss.Color("#2aa198") // solarized cyan
 	highlightColor = lipgloss.Color("#b58900") // solarized yellow
@@ -227,12 +243,15 @@ func formatConversation(msgs []chatMessage, terms []string) string {
 }
 
 func styledHighlight(text string, terms []string, baseStyle lipgloss.Style) string {
-	if len(terms) == 0 {
-		return baseStyle.Render(text)
-	}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		lines[i] = styledHighlightLine(line, terms, baseStyle)
+		if len(terms) == 0 {
+			if line != "" {
+				lines[i] = baseStyle.Render(line)
+			}
+		} else {
+			lines[i] = styledHighlightLine(line, terms, baseStyle)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -507,6 +526,7 @@ func initialModel() model {
 
 	vp := viewport.New()
 	vp.Style = lipgloss.NewStyle()
+	vp.SoftWrap = true
 
 	si := textinput.New()
 	si.Prompt = " / "
