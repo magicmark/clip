@@ -25,3 +25,7 @@ chmod +x clip && mv clip /usr/local/bin/
 curl -L -o clip "https://github.com/magicmark/clip/releases/latest/download/clip-linux-amd64"
 chmod +x clip && mv clip /usr/local/bin/
 ```
+
+## Prior Art + Acknowledgments
+
+Inspired by https://github.com/angristan/fast-resume
