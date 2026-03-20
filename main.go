@@ -767,7 +767,7 @@ func (m *model) updateSizes() {
 
 	halfWidth := m.width / 2
 
-	m.search.SetWidth(m.width - 6)
+	m.search.SetWidth(m.width - 4)
 
 	// Table: left half
 	tableInner := halfWidth - 2
@@ -777,8 +777,8 @@ func (m *model) updateSizes() {
 	// Distribute column widths: Title gets the lion's share
 	cols := m.table.Columns()
 	if len(cols) == 4 {
-		gap := len(cols) + 1
-		available := tableInner - gap
+		padding := len(cols) * 2 // Cell style has Padding(0,1) = 1 char each side
+		available := tableInner - padding
 		// Fixed widths for Turns and Date
 		turnsW := 5
 		dateW := 12
@@ -807,9 +807,9 @@ func (m model) View() tea.View {
 	// Search bar
 	var sBorder lipgloss.Style
 	if m.focus == focusSearch {
-		sBorder = searchBarStyle.Width(m.width - 2)
+		sBorder = searchBarStyle.Width(m.width)
 	} else {
-		sBorder = searchBarInactive.Width(m.width - 2)
+		sBorder = searchBarInactive.Width(m.width)
 	}
 	searchBar := sBorder.Render(m.search.View())
 
