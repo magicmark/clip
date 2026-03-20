@@ -22,7 +22,7 @@ jobs:
       - name: Check if version is newer than latest tag
         id: check
         run: |
-          VERSION=$(grep '^VERSION' Makefile | sed 's/.*?= *//')
+          VERSION=$(grep '^VERSION' Makefile | sed 's/.*:= *//')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           LATEST=$(git tag --sort=-v:refname | head -1)
