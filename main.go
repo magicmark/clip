@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,6 +28,7 @@ const (
 )
 
 type session struct {
+	id        string
 	path      string
 	title     string
 	directory string
@@ -105,7 +107,10 @@ func parseSession(path string) session {
 	}
 	defer f.Close()
 
-	s := session{path: path}
+	s := session{
+		id:   strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		path: path,
+	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 
@@ -184,27 +189,36 @@ func truncate(s string, max int) string {
 	return s
 }
 
-var multiNewline = regexp.MustCompile(`\n{3,}`)
+var (
+	multiNewline = regexp.MustCompile(`\n{3,}`)
+	hrRule       = regexp.MustCompile(`\n---\n`)
+	previewRole  = lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Bold(true)
+	previewUser  = lipgloss.NewStyle().Foreground(lipgloss.Color("223"))
+	previewAsst  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+)
 
 func formatConversation(msgs []chatMessage) string {
 	var b strings.Builder
 	for _, m := range msgs {
-		if m.role == "user" {
-			b.WriteString(">>> USER:\n")
-		} else {
-			b.WriteString("<<< ASSISTANT:\n")
-		}
 		text := normalizeText(m.content)
-		b.WriteString(text)
+		if m.role == "user" {
+			b.WriteString(previewRole.Render("You:"))
+			b.WriteString("\n")
+			b.WriteString(previewUser.Render(text))
+		} else {
+			b.WriteString(previewRole.Render("Claude:"))
+			b.WriteString("\n")
+			b.WriteString(previewAsst.Render(text))
+		}
 		b.WriteString("\n\n")
 	}
 	return b.String()
 }
 
 func normalizeText(s string) string {
-	// Collapse 3+ newlines into 2
+	s = hrRule.ReplaceAllString(s, "\n")
 	s = multiNewline.ReplaceAllString(s, "\n\n")
-	// Remove leading whitespace from each line
+	s = strings.TrimLeft(s, "\n")
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimLeft(line, " \t")
@@ -275,13 +289,12 @@ func initialModel() model {
 
 	s := table.DefaultStyles()
 	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		BorderBottom(true).
-		Bold(false)
+		Bold(true).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252"))
 	s.Selected = s.Selected.
 		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
+		Background(lipgloss.Color("22")).
 		Bold(false)
 	t.SetStyles(s)
 
@@ -367,6 +380,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyFocus(&cmds)
 				return m, tea.Batch(cmds...)
 			}
+		case "right":
+			if m.focus == focusTable {
+				m.focus = focusViewer
+				m.applyFocus(&cmds)
+				return m, tea.Batch(cmds...)
+			}
+		case "left":
+			if m.focus == focusViewer {
+				m.focus = focusTable
+				m.applyFocus(&cmds)
+				return m, tea.Batch(cmds...)
+			}
+		case "enter":
+			if m.focus == focusTable || m.focus == focusViewer {
+				if s := m.selectedSession(); s != nil {
+					c := exec.Command("claude", "--resume", s.id)
+					if s.directory != "" {
+						c.Dir = s.directory
+					}
+					return m, tea.ExecProcess(c, func(err error) tea.Msg {
+						return tea.QuitMsg{}
+					})
+				}
+			}
+		case "/":
+			if m.focus != focusSearch {
+				m.focus = focusSearch
+				m.applyFocus(&cmds)
+				return m, tea.Batch(cmds...)
+			}
 		}
 	}
 
@@ -409,6 +452,13 @@ func (m *model) applyFocus(cmds *[]tea.Cmd) {
 	case focusViewer:
 		// viewport doesn't have focus/blur
 	}
+}
+
+func (m *model) selectedSession() *session {
+	if m.selectedIdx >= 0 && m.selectedIdx < len(m.sessions) {
+		return &m.sessions[m.selectedIdx]
+	}
+	return nil
 }
 
 func (m *model) updateViewer() {
