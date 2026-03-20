@@ -392,6 +392,14 @@ func searchSessions(idx bleve.Index, query string) (map[string]bool, []string) {
 func initialModel() model {
 	sessions := loadSessions()
 
+	idx, err := openOrCreateIndex()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: search index unavailable: %v\n", err)
+	}
+	if idx != nil {
+		syncIndex(idx, sessions)
+	}
+
 	columns := []table.Column{
 		{Title: "Title", Width: 40},
 		{Title: "Directory", Width: 20},
@@ -443,6 +451,7 @@ func initialModel() model {
 		allRows:     rows,
 		focus:       focusSearch,
 		selectedIdx: -1,
+		index:       idx,
 	}
 }
 
@@ -612,18 +621,39 @@ func (m *model) updateViewer() {
 }
 
 func (m *model) filterRows() {
-	query := strings.ToLower(strings.TrimSpace(m.search.Value()))
+	query := strings.TrimSpace(m.search.Value())
 	if query == "" {
 		m.table.SetRows(m.allRows)
+		m.matchedIDs = nil
+		m.matchedTerms = nil
+		m.updateViewer()
 		return
 	}
+
+	if m.index == nil {
+		q := strings.ToLower(query)
+		var filtered []table.Row
+		for _, row := range m.allRows {
+			if strings.Contains(strings.ToLower(row[0]), q) {
+				filtered = append(filtered, row)
+			}
+		}
+		m.table.SetRows(filtered)
+		return
+	}
+
+	matchedIDs, matchedTerms := searchSessions(m.index, query)
+	m.matchedIDs = matchedIDs
+	m.matchedTerms = matchedTerms
+
 	var filtered []table.Row
-	for _, row := range m.allRows {
-		if strings.Contains(strings.ToLower(row[0]), query) {
+	for i, row := range m.allRows {
+		if i < len(m.sessions) && matchedIDs[m.sessions[i].id] {
 			filtered = append(filtered, row)
 		}
 	}
 	m.table.SetRows(filtered)
+	m.updateViewer()
 }
 
 func (m *model) updateSizes() {
