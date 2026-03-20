@@ -197,12 +197,13 @@ func truncate(s string, max int) string {
 }
 
 var (
+	accent       = lipgloss.Color("95")
 	multiNewline = regexp.MustCompile(`\n{3,}`)
 	hrRule       = regexp.MustCompile(`\n---\n`)
 	previewRole  = lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Bold(true)
 	previewUser  = lipgloss.NewStyle().Foreground(lipgloss.Color("223"))
 	previewAsst  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	highlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("178")).Foreground(lipgloss.Color("0"))
+	highlightStyle = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("255"))
 )
 
 func formatConversation(msgs []chatMessage, terms []string) string {
@@ -498,8 +499,8 @@ func initialModel() model {
 		Background(lipgloss.Color("236")).
 		Foreground(lipgloss.Color("252"))
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("22")).
+		Foreground(lipgloss.Color("255")).
+		Background(accent).
 		Bold(false)
 	t.SetStyles(s)
 
@@ -525,13 +526,13 @@ func initialModel() model {
 var (
 	activeBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62"))
+			BorderForeground(accent)
 	inactiveBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240"))
 	searchBarStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62"))
+			BorderForeground(accent)
 	searchBarInactive = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("240"))
