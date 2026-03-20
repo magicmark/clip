@@ -29,3 +29,7 @@ chmod +x clip && mv clip /usr/local/bin/
 ## Prior Art + Acknowledgments
 
 Inspired by https://github.com/angristan/fast-resume
+
+## License
+
+MIT
