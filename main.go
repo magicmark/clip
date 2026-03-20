@@ -211,40 +211,29 @@ func formatConversation(msgs []chatMessage, terms []string) string {
 		if m.role == "user" {
 			b.WriteString(previewRole.Render("You:"))
 			b.WriteString("\n")
-			b.WriteString(highlightTerms(previewUser.Render(text), terms))
+			b.WriteString(styledHighlight(text, terms, previewUser))
 		} else {
 			b.WriteString(previewRole.Render("Claude:"))
 			b.WriteString("\n")
-			b.WriteString(highlightTerms(previewAsst.Render(text), terms))
+			b.WriteString(styledHighlight(text, terms, previewAsst))
 		}
 		b.WriteString("\n\n")
 	}
 	return b.String()
 }
 
-func normalizeText(s string) string {
-	s = hrRule.ReplaceAllString(s, "\n")
-	s = multiNewline.ReplaceAllString(s, "\n\n")
-	s = strings.TrimLeft(s, "\n")
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimLeft(line, " \t")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func highlightTerms(text string, terms []string) string {
+func styledHighlight(text string, terms []string, baseStyle lipgloss.Style) string {
 	if len(terms) == 0 {
-		return text
+		return baseStyle.Render(text)
 	}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		lines[i] = highlightLine(line, terms)
+		lines[i] = styledHighlightLine(line, terms, baseStyle)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func highlightLine(line string, terms []string) string {
+func styledHighlightLine(line string, terms []string, baseStyle lipgloss.Style) string {
 	if line == "" {
 		return line
 	}
@@ -267,7 +256,7 @@ func highlightLine(line string, terms []string) string {
 	}
 
 	if len(spans) == 0 {
-		return line
+		return baseStyle.Render(line)
 	}
 
 	sort.Slice(spans, func(i, j int) bool {
@@ -292,15 +281,26 @@ func highlightLine(line string, terms []string) string {
 	pos := 0
 	for _, s := range merged {
 		if s.start > pos {
-			b.WriteString(line[pos:s.start])
+			b.WriteString(baseStyle.Render(line[pos:s.start]))
 		}
 		b.WriteString(highlightStyle.Render(line[s.start:s.end]))
 		pos = s.end
 	}
 	if pos < len(line) {
-		b.WriteString(line[pos:])
+		b.WriteString(baseStyle.Render(line[pos:]))
 	}
 	return b.String()
+}
+
+func normalizeText(s string) string {
+	s = hrRule.ReplaceAllString(s, "\n")
+	s = multiNewline.ReplaceAllString(s, "\n\n")
+	s = strings.TrimLeft(s, "\n")
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func relativeTime(t time.Time) string {
