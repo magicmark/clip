@@ -197,13 +197,13 @@ func truncate(s string, max int) string {
 }
 
 var (
-	accent       = lipgloss.Color("95")
+	accent       = lipgloss.Color("136") // solarized yellow
 	multiNewline = regexp.MustCompile(`\n{3,}`)
 	hrRule       = regexp.MustCompile(`\n---\n`)
-	previewRole  = lipgloss.NewStyle().Foreground(lipgloss.Color("109")).Bold(true)
-	previewUser  = lipgloss.NewStyle().Foreground(lipgloss.Color("223"))
-	previewAsst  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	highlightStyle = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("255"))
+	previewRole  = lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)  // solarized blue
+	previewUser  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))            // solarized base3
+	previewAsst  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))            // solarized base0
+	highlightStyle = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("235")) // base02 on yellow
 )
 
 func formatConversation(msgs []chatMessage, terms []string) string {
@@ -496,10 +496,10 @@ func initialModel() model {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		Bold(true).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252"))
+		Background(lipgloss.Color("235")).   // solarized base02
+		Foreground(lipgloss.Color("245"))    // solarized base1
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("255")).
+		Foreground(lipgloss.Color("235")).   // solarized base02
 		Background(accent).
 		Bold(false)
 	t.SetStyles(s)
@@ -529,14 +529,14 @@ var (
 			BorderForeground(accent)
 	inactiveBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(lipgloss.Color("240")) // solarized base01
 	searchBarStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(accent)
 	searchBarInactive = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("240"))
-	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+				BorderForeground(lipgloss.Color("240")) // solarized base01
+	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")) // solarized base00
 )
 
 func (m model) Init() tea.Cmd {
