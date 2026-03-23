@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/blevesearch/bleve/v2"
 	index "github.com/blevesearch/bleve_index_api"
+	"github.com/bmatcuk/doublestar/v4"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
@@ -64,13 +65,11 @@ func loadConfig() config {
 
 func isIgnored(dir string) bool {
 	for _, pattern := range cfg.IgnoreDirectories {
-		// Check the directory itself and all its parents.
-		// filepath.Match "*" doesn't cross "/" so we need to check
-		// each ancestor to handle patterns like "/tmp/pr-review*"
-		// matching "/tmp/pr-review-123/subdir".
+		// Check the directory and all its parents so that a pattern
+		// like "/tmp/pr-review*" also matches "/tmp/pr-review-123/sub".
 		d := dir
 		for d != "" && d != "/" {
-			if matched, _ := filepath.Match(pattern, d); matched {
+			if matched, _ := doublestar.Match(pattern, d); matched {
 				return true
 			}
 			d = filepath.Dir(d)
