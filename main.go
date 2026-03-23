@@ -197,12 +197,13 @@ func parseSession(path string) session {
 			continue
 		}
 
-		text := extractText(rec.Message.Content)
+		text := strings.TrimSpace(extractText(rec.Message.Content))
 		if text == "" {
 			continue
 		}
 
 		text = stripSkillContent(text)
+		text = normalizeCommands(text)
 
 		if rec.Message.Role == "user" {
 			s.turns++
@@ -249,7 +250,32 @@ func truncate(s string, max int) string {
 	return s
 }
 
-var skillPrefix = "Base directory for this skill: "
+var (
+	skillPrefix    = "Base directory for this skill: "
+	reCommandName  = regexp.MustCompile(`<command-name>/([^<]+)</command-name>`)
+	reCommandArgs  = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
+	reCommandMsg   = regexp.MustCompile(`<command-message>[^<]*</command-message>`)
+)
+
+func normalizeCommands(text string) string {
+	name := reCommandName.FindStringSubmatch(text)
+	if name == nil {
+		return text
+	}
+	cmd := "/" + name[1]
+	if args := reCommandArgs.FindStringSubmatch(text); args != nil && strings.TrimSpace(args[1]) != "" {
+		cmd += " " + strings.TrimSpace(args[1])
+	}
+	// Remove all command XML tags
+	text = reCommandName.ReplaceAllString(text, "")
+	text = reCommandArgs.ReplaceAllString(text, "")
+	text = reCommandMsg.ReplaceAllString(text, "")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return cmd
+	}
+	return cmd + "\n" + text
+}
 
 func stripSkillContent(text string) string {
 	if strings.HasPrefix(text, skillPrefix) {
