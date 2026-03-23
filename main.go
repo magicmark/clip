@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/blevesearch/bleve/v2"
 	index "github.com/blevesearch/bleve_index_api"
 
@@ -34,8 +35,40 @@ const (
 
 var homeDir string
 
+type config struct {
+	IgnoreDirectories  []string `toml:"ignore_directories"`
+	ClaudeStartupFlags string   `toml:"claude_startup_flags"`
+}
+
+var cfg config
+
 func init() {
 	homeDir, _ = os.UserHomeDir()
+	cfg = loadConfig()
+}
+
+func loadConfig() config {
+	var c config
+	path := filepath.Join(homeDir, ".config", "clip.toml")
+	if _, err := toml.DecodeFile(path, &c); err != nil {
+		return c
+	}
+	for _, dir := range c.IgnoreDirectories {
+		if !filepath.IsAbs(dir) {
+			fmt.Fprintf(os.Stderr, "clip: ignore_directories paths must be absolute: %q\n", dir)
+			os.Exit(1)
+		}
+	}
+	return c
+}
+
+func isIgnored(dir string) bool {
+	for _, pattern := range cfg.IgnoreDirectories {
+		if matched, _ := filepath.Match(pattern, dir); matched {
+			return true
+		}
+	}
+	return false
 }
 
 type session struct {
@@ -102,9 +135,13 @@ func loadSessions() []session {
 	var sessions []session
 	for _, f := range files {
 		s := parseSession(f)
-		if s.title != "" {
-			sessions = append(sessions, s)
+		if s.title == "" {
+			continue
 		}
+		if s.directory != "" && isIgnored(s.directory) {
+			continue
+		}
+		sessions = append(sessions, s)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -652,7 +689,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.focus == focusTable || m.focus == focusViewer {
 				if s := m.selectedSession(); s != nil {
-					c := exec.Command("claude", "--resume", s.id)
+					args := []string{"--resume", s.id}
+					if cfg.ClaudeStartupFlags != "" {
+						args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
+					}
+					c := exec.Command("claude", args...)
 					if s.directory != "" {
 						c.Dir = s.directory
 					}
