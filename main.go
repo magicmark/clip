@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/blevesearch/bleve/v2"
 	index "github.com/blevesearch/bleve_index_api"
 
@@ -28,7 +29,47 @@ const (
 	focusSearch = iota
 	focusTable
 	focusViewer
+
+	maxSearchResults = 10000
 )
+
+var homeDir string
+
+type config struct {
+	IgnoreDirectories  []string `toml:"ignore_directories"`
+	ClaudeStartupFlags string   `toml:"claude_startup_flags"`
+}
+
+var cfg config
+
+func init() {
+	homeDir, _ = os.UserHomeDir()
+	cfg = loadConfig()
+}
+
+func loadConfig() config {
+	var c config
+	path := filepath.Join(homeDir, ".config", "clip.toml")
+	if _, err := toml.DecodeFile(path, &c); err != nil {
+		return c
+	}
+	for _, dir := range c.IgnoreDirectories {
+		if !filepath.IsAbs(dir) {
+			fmt.Fprintf(os.Stderr, "clip: ignore_directories paths must be absolute: %q\n", dir)
+			os.Exit(1)
+		}
+	}
+	return c
+}
+
+func isIgnored(dir string) bool {
+	for _, pattern := range cfg.IgnoreDirectories {
+		if matched, _ := filepath.Match(pattern, dir); matched {
+			return true
+		}
+	}
+	return false
+}
 
 type session struct {
 	id        string
@@ -58,24 +99,24 @@ type msgField struct {
 }
 
 type model struct {
-	search      textinput.Model
-	table       table.Model
-	viewer      viewport.Model
-	sessions    []session
-	allRows     []table.Row
-	focus       int
-	width       int
-	height      int
-	ready        bool
-	selectedIdx  int
-	index        bleve.Index
-	matchedIDs   map[string]bool
-	matchedTerms []string
+	search          textinput.Model
+	table           table.Model
+	viewer          viewport.Model
+	sessions        []session
+	allRows         []table.Row
+	filteredIndices []int
+	focus           int
+	width           int
+	height          int
+	ready           bool
+	selectedIdx     int
+	index           bleve.Index
+	matchedIDs      map[string]struct{}
+	matchedTerms    []string
 }
 
 func loadSessions() []session {
-	home, _ := os.UserHomeDir()
-	base := filepath.Join(home, ".claude", "projects")
+	base := filepath.Join(homeDir, ".claude", "projects")
 
 	var files []string
 	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
@@ -94,9 +135,13 @@ func loadSessions() []session {
 	var sessions []session
 	for _, f := range files {
 		s := parseSession(f)
-		if s.title != "" {
-			sessions = append(sessions, s)
+		if s.title == "" {
+			continue
 		}
+		if s.directory != "" && isIgnored(s.directory) {
+			continue
+		}
+		sessions = append(sessions, s)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -118,7 +163,7 @@ func parseSession(path string) session {
 		path: path,
 	}
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	scanner.Buffer(make([]byte, 0, 4096), 10*1024*1024)
 
 	for scanner.Scan() {
 		var rec jsonlRecord
@@ -213,15 +258,25 @@ func stripSkillContent(text string) string {
 }
 
 var (
-	accent         = lipgloss.Color("#2aa198") // solarized cyan
-	highlightColor = lipgloss.Color("#b58900") // solarized yellow
+	// Solarized palette
+	base03 = lipgloss.Color("#002b36")
+	base01 = lipgloss.Color("#586e75")
+	base00 = lipgloss.Color("#657b83")
+	base1  = lipgloss.Color("#93a1a1")
+	base2  = lipgloss.Color("#eee8d5")
+	cyan   = lipgloss.Color("#2aa198")
+	violet = lipgloss.Color("#6c71c4")
+	yellow = lipgloss.Color("#b58900")
+
+	accent         = cyan
+	highlightColor = yellow
 	multiNewline   = regexp.MustCompile(`\n{3,}`)
 	hrRule         = regexp.MustCompile(`\n---\n`)
-	previewYou     = lipgloss.NewStyle().Foreground(lipgloss.Color("#2aa198")).Bold(true) // cyan for "You:"
-	previewClaude  = lipgloss.NewStyle().Foreground(lipgloss.Color("#6c71c4")).Bold(true) // violet for "Claude:"
-	previewUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("#eee8d5"))            // solarized base2
-	previewAsst    = lipgloss.NewStyle().Foreground(lipgloss.Color("#93a1a1"))            // solarized base1
-	highlightStyle = lipgloss.NewStyle().Background(highlightColor).Foreground(lipgloss.Color("#002b36")) // base03 on yellow
+	previewYou     = lipgloss.NewStyle().Foreground(cyan).Bold(true)
+	previewClaude  = lipgloss.NewStyle().Foreground(violet).Bold(true)
+	previewUser    = lipgloss.NewStyle().Foreground(base2)
+	previewAsst    = lipgloss.NewStyle().Foreground(base1)
+	highlightStyle = lipgloss.NewStyle().Background(highlightColor).Foreground(base03)
 )
 
 func formatConversation(msgs []chatMessage, terms []string) string {
@@ -243,29 +298,29 @@ func formatConversation(msgs []chatMessage, terms []string) string {
 }
 
 func styledHighlight(text string, terms []string, baseStyle lipgloss.Style) string {
+	lowerTerms := make([]string, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = strings.ToLower(t)
+	}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		if len(terms) == 0 {
-			if line != "" {
-				lines[i] = baseStyle.Render(line)
-			}
-		} else {
-			lines[i] = styledHighlightLine(line, terms, baseStyle)
-		}
+		lines[i] = styledHighlightLine(line, lowerTerms, baseStyle)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func styledHighlightLine(line string, terms []string, baseStyle lipgloss.Style) string {
+func styledHighlightLine(line string, lowerTerms []string, baseStyle lipgloss.Style) string {
 	if line == "" {
 		return line
+	}
+	if len(lowerTerms) == 0 {
+		return baseStyle.Render(line)
 	}
 	lower := strings.ToLower(line)
 
 	type span struct{ start, end int }
 	var spans []span
-	for _, term := range terms {
-		tl := strings.ToLower(term)
+	for _, tl := range lowerTerms {
 		offset := 0
 		for {
 			idx := strings.Index(lower[offset:], tl)
@@ -353,9 +408,8 @@ func relativeTime(t time.Time) string {
 }
 
 func shortenDir(dir string) string {
-	home, _ := os.UserHomeDir()
-	if strings.HasPrefix(dir, home) {
-		return "~" + dir[len(home):]
+	if strings.HasPrefix(dir, homeDir) {
+		return "~" + dir[len(homeDir):]
 	}
 	return dir
 }
@@ -369,8 +423,7 @@ type sessionDoc struct {
 }
 
 func openOrCreateIndex() (bleve.Index, error) {
-	home, _ := os.UserHomeDir()
-	indexPath := filepath.Join(home, ".cache", "clips", "search.index")
+	indexPath := filepath.Join(homeDir, ".cache", "clips", "search.index")
 
 	idx, err := bleve.Open(indexPath)
 	if err == bleve.ErrorIndexPathDoesNotExist {
@@ -386,9 +439,9 @@ func openOrCreateIndex() (bleve.Index, error) {
 }
 
 func syncIndex(idx bleve.Index, sessions []session) {
-	currentIDs := make(map[string]bool)
+	currentIDs := make(map[string]struct{})
 	for _, s := range sessions {
-		currentIDs[s.id] = true
+		currentIDs[s.id] = struct{}{}
 	}
 
 	for _, s := range sessions {
@@ -433,27 +486,27 @@ func syncIndex(idx bleve.Index, sessions []session) {
 
 	q := bleve.NewMatchAllQuery()
 	req := bleve.NewSearchRequest(q)
-	req.Size = 10000
+	req.Size = maxSearchResults
 	req.Fields = []string{}
 	results, err := idx.Search(req)
 	if err != nil {
 		return
 	}
 	for _, hit := range results.Hits {
-		if !currentIDs[hit.ID] {
+		if _, ok := currentIDs[hit.ID]; !ok {
 			idx.Delete(hit.ID)
 		}
 	}
 }
 
-func searchSessions(idx bleve.Index, query string) (map[string]bool, []string) {
-	matchedIDs := make(map[string]bool)
+func searchSessions(idx bleve.Index, query string) (map[string]struct{}, []string) {
+	matchedIDs := make(map[string]struct{})
 	var matchedTerms []string
 
 	q := bleve.NewQueryStringQuery(query)
 	req := bleve.NewSearchRequest(q)
-	req.Size = 10000
-	req.Fields = []string{"title", "content"}
+	req.Size = maxSearchResults
+	req.Fields = []string{}
 	req.Highlight = bleve.NewHighlight()
 
 	results, err := idx.Search(req)
@@ -461,16 +514,16 @@ func searchSessions(idx bleve.Index, query string) (map[string]bool, []string) {
 		return matchedIDs, matchedTerms
 	}
 
-	termSet := make(map[string]bool)
+	termSet := make(map[string]struct{})
 	for _, hit := range results.Hits {
-		matchedIDs[hit.ID] = true
+		matchedIDs[hit.ID] = struct{}{}
 		for _, fragments := range hit.Fragments {
 			for _, frag := range fragments {
 				parts := strings.Split(frag, "<mark>")
 				for i := 1; i < len(parts); i++ {
 					if end := strings.Index(parts[i], "</mark>"); end >= 0 {
 						term := parts[i][:end]
-						termSet[strings.ToLower(term)] = true
+						termSet[strings.ToLower(term)] = struct{}{}
 					}
 				}
 			}
@@ -517,9 +570,9 @@ func initialModel() model {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		Bold(true).
-		Foreground(lipgloss.Color("#93a1a1")) // solarized base1
+		Foreground(base1)
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("#002b36")). // solarized base03
+		Foreground(base03).
 		Background(accent).
 		Bold(false)
 	t.SetStyles(s)
@@ -533,14 +586,20 @@ func initialModel() model {
 	si.Placeholder = "Filter sessions..."
 	si.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
 
+	allIndices := make([]int, len(sessions))
+	for i := range allIndices {
+		allIndices[i] = i
+	}
+
 	return model{
-		search:      si,
-		table:       t,
-		viewer:      vp,
-		sessions:    sessions,
-		allRows:     rows,
-		focus:       focusSearch,
-		selectedIdx: -1,
+		search:          si,
+		table:           t,
+		viewer:          vp,
+		sessions:        sessions,
+		allRows:         rows,
+		filteredIndices: allIndices,
+		focus:           focusSearch,
+		selectedIdx:     -1,
 	}
 }
 
@@ -550,14 +609,14 @@ var (
 			BorderForeground(accent)
 	inactiveBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#586e75")) // solarized base01
+			BorderForeground(base01)
 	searchBarStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(accent)
 	searchBarInactive = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#586e75")) // solarized base01
-	helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#657b83")) // solarized base00
+				BorderForeground(base01)
+	helpStyle = lipgloss.NewStyle().Foreground(base00)
 )
 
 func (m model) Init() tea.Cmd {
@@ -589,9 +648,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.updateSizes()
 		if !wasReady {
-			var initCmds []tea.Cmd
-			m.applyFocus(&initCmds)
-			return m, tea.Batch(initCmds...)
+			return m, m.applyFocus()
 		}
 		return m, nil
 
@@ -605,40 +662,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "tab":
 			m.focus = (m.focus + 1) % 3
-			m.applyFocus(&cmds)
-			return m, tea.Batch(cmds...)
+			return m, m.applyFocus()
 		case "shift+tab":
 			m.focus = (m.focus + 2) % 3
-			m.applyFocus(&cmds)
-			return m, tea.Batch(cmds...)
+			return m, m.applyFocus()
 		case "down":
 			if m.focus == focusSearch {
 				m.focus = focusTable
-				m.applyFocus(&cmds)
-				return m, tea.Batch(cmds...)
+				return m, m.applyFocus()
 			}
 		case "up":
 			if m.focus == focusTable && m.table.Cursor() == 0 {
 				m.focus = focusSearch
-				m.applyFocus(&cmds)
-				return m, tea.Batch(cmds...)
+				return m, m.applyFocus()
 			}
 		case "right":
 			if m.focus == focusTable {
 				m.focus = focusViewer
-				m.applyFocus(&cmds)
-				return m, tea.Batch(cmds...)
+				return m, m.applyFocus()
 			}
 		case "left":
 			if m.focus == focusViewer {
 				m.focus = focusTable
-				m.applyFocus(&cmds)
-				return m, tea.Batch(cmds...)
+				return m, m.applyFocus()
 			}
 		case "enter":
 			if m.focus == focusTable || m.focus == focusViewer {
 				if s := m.selectedSession(); s != nil {
-					c := exec.Command("claude", "--resume", s.id)
+					args := []string{"--resume", s.id}
+					if cfg.ClaudeStartupFlags != "" {
+						args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
+					}
+					c := exec.Command("claude", args...)
 					if s.directory != "" {
 						c.Dir = s.directory
 					}
@@ -650,8 +705,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "/":
 			if m.focus != focusSearch {
 				m.focus = focusSearch
-				m.applyFocus(&cmds)
-				return m, tea.Batch(cmds...)
+				return m, m.applyFocus()
 			}
 		}
 	}
@@ -682,19 +736,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *model) applyFocus(cmds *[]tea.Cmd) {
+func (m *model) applyFocus() tea.Cmd {
 	m.search.Blur()
 	m.table.Blur()
 
 	switch m.focus {
 	case focusSearch:
-		*cmds = append(*cmds, m.search.Focus())
+		return m.search.Focus()
 	case focusTable:
 		m.table.Focus()
 		m.updateViewer()
-	case focusViewer:
-		// viewport doesn't have focus/blur
 	}
+	return nil
 }
 
 func (m *model) selectedSession() *session {
@@ -705,27 +758,23 @@ func (m *model) selectedSession() *session {
 }
 
 func (m *model) updateViewer() {
-	row := m.table.SelectedRow()
-	if row == nil {
+	cursor := m.table.Cursor()
+	if cursor < 0 || cursor >= len(m.filteredIndices) {
 		m.viewer.SetContent("")
 		m.selectedIdx = -1
 		return
 	}
-	title := row[0]
-	for i, s := range m.sessions {
-		if s.title == title {
-			m.selectedIdx = i
-			m.viewer.SetContent(formatConversation(s.messages, m.matchedTerms))
-			m.viewer.GotoTop()
-			return
-		}
-	}
+	idx := m.filteredIndices[cursor]
+	m.selectedIdx = idx
+	m.viewer.SetContent(formatConversation(m.sessions[idx].messages, m.matchedTerms))
+	m.viewer.GotoTop()
 }
 
 func (m *model) filterRows() {
 	query := strings.TrimSpace(m.search.Value())
 	if query == "" {
 		m.table.SetRows(m.allRows)
+		m.filteredIndices = m.allIndices()
 		m.matchedIDs = nil
 		m.matchedTerms = nil
 		m.updateViewer()
@@ -735,12 +784,16 @@ func (m *model) filterRows() {
 	if m.index == nil {
 		q := strings.ToLower(query)
 		var filtered []table.Row
-		for _, row := range m.allRows {
+		var indices []int
+		for i, row := range m.allRows {
 			if strings.Contains(strings.ToLower(row[0]), q) {
 				filtered = append(filtered, row)
+				indices = append(indices, i)
 			}
 		}
 		m.table.SetRows(filtered)
+		m.filteredIndices = indices
+		m.updateViewer()
 		return
 	}
 
@@ -749,13 +802,26 @@ func (m *model) filterRows() {
 	m.matchedTerms = matchedTerms
 
 	var filtered []table.Row
+	var indices []int
 	for i, row := range m.allRows {
-		if i < len(m.sessions) && matchedIDs[m.sessions[i].id] {
-			filtered = append(filtered, row)
+		if i < len(m.sessions) {
+			if _, ok := matchedIDs[m.sessions[i].id]; ok {
+				filtered = append(filtered, row)
+				indices = append(indices, i)
+			}
 		}
 	}
 	m.table.SetRows(filtered)
+	m.filteredIndices = indices
 	m.updateViewer()
+}
+
+func (m *model) allIndices() []int {
+	indices := make([]int, len(m.sessions))
+	for i := range indices {
+		indices[i] = i
+	}
+	return indices
 }
 
 func (m *model) updateSizes() {

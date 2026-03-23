@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.4.5 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
