@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,6 +112,33 @@ ignore_directories = ["relative/path"]
 	for _, p := range []string{"/absolute/path", "/tmp/foo"} {
 		if !filepath.IsAbs(p) {
 			t.Errorf("expected %q to be absolute", p)
+		}
+	}
+}
+
+func TestClaudeStartupFlagsArgs(t *testing.T) {
+	tests := []struct {
+		flags string
+		want  []string
+	}{
+		{"--dangerously-skip-permissions", []string{"--resume", "abc123", "--dangerously-skip-permissions"}},
+		{"--dangerously-skip-permissions --verbose", []string{"--resume", "abc123", "--dangerously-skip-permissions", "--verbose"}},
+		{"", []string{"--resume", "abc123"}},
+	}
+
+	for _, tt := range tests {
+		args := []string{"--resume", "abc123"}
+		if tt.flags != "" {
+			args = append(args, strings.Fields(tt.flags)...)
+		}
+		if len(args) != len(tt.want) {
+			t.Errorf("flags=%q: got %d args, want %d", tt.flags, len(args), len(tt.want))
+			continue
+		}
+		for i := range args {
+			if args[i] != tt.want[i] {
+				t.Errorf("flags=%q: args[%d]=%q, want %q", tt.flags, i, args[i], tt.want[i])
+			}
 		}
 	}
 }
