@@ -150,6 +150,49 @@ func TestClaudeStartupFlagsArgs(t *testing.T) {
 	}
 }
 
+func TestNormalizeCommands(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"simple command",
+			"<command-message>swag</command-message>\n<command-name>/swag</command-name>",
+			"/swag",
+		},
+		{
+			"command with args",
+			"<command-message>model sonnet</command-message>\n<command-name>/model</command-name>\n<command-args>sonnet</command-args>",
+			"/model sonnet",
+		},
+		{
+			"no command tags",
+			"just a normal message",
+			"just a normal message",
+		},
+		{
+			"command name only",
+			"<command-name>/commit</command-name>",
+			"/commit",
+		},
+		{
+			"command with empty args",
+			"<command-name>/help</command-name>\n<command-args></command-args>",
+			"/help",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeCommands(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeCommands(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadSessionsIgnoresDirectories(t *testing.T) {
 	origCfg := cfg
 	t.Cleanup(func() { cfg = origCfg })
