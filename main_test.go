@@ -63,6 +63,7 @@ func TestIsIgnored(t *testing.T) {
 			"/tmp/secret",
 			"/home/*/private",
 			"/var/log/*",
+			"/tmp/pr-review*",
 		},
 	}
 
@@ -71,13 +72,19 @@ func TestIsIgnored(t *testing.T) {
 		ignore bool
 	}{
 		{"/tmp/secret", true},
+		{"/tmp/secret/subdir", true},
 		{"/tmp/other", false},
 		{"/home/mark/private", true},
 		{"/home/jane/private", true},
+		{"/home/jane/private/deep/nested", true},
 		{"/home/mark/public", false},
 		{"/var/log/syslog", true},
 		{"/var/log/auth", true},
 		{"/var/data/stuff", false},
+		{"/tmp/pr-review-123", true},
+		{"/tmp/pr-review-123/subdir", true},
+		{"/tmp/pr-review-abc/foo/bar", true},
+		{"/tmp/pr-other", false},
 	}
 
 	for _, tt := range tests {

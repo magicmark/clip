@@ -64,8 +64,16 @@ func loadConfig() config {
 
 func isIgnored(dir string) bool {
 	for _, pattern := range cfg.IgnoreDirectories {
-		if matched, _ := filepath.Match(pattern, dir); matched {
-			return true
+		// Check the directory itself and all its parents.
+		// filepath.Match "*" doesn't cross "/" so we need to check
+		// each ancestor to handle patterns like "/tmp/pr-review*"
+		// matching "/tmp/pr-review-123/subdir".
+		d := dir
+		for d != "" && d != "/" {
+			if matched, _ := filepath.Match(pattern, d); matched {
+				return true
+			}
+			d = filepath.Dir(d)
 		}
 	}
 	return false
