@@ -120,6 +120,7 @@ type model struct {
 	index           bleve.Index
 	matchedIDs      map[string]struct{}
 	matchedTerms    []string
+	exitMessage     string
 }
 
 func loadSessions() []session {
@@ -722,6 +723,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.focus == focusTable || m.focus == focusViewer {
 				if s := m.selectedSession(); s != nil {
+					if s.directory != "" {
+						if _, err := os.Stat(s.directory); os.IsNotExist(err) {
+							m.exitMessage = fmt.Sprintf(
+								"\nThe original directory for this session no longer exists:\n  %s\n\n"+
+									"The session transcript is still available at:\n  %s\n\n"+
+									"To recover this session, start claude and paste this prompt:\n\n"+
+									"  Read the file %s — it's a JSONL transcript of a previous conversation. Summarize what we were working on and continue where we left off.\n",
+								s.directory, s.path, s.path,
+							)
+							return m, tea.Quit
+						}
+					}
 					args := []string{"--resume", s.id}
 					if cfg.ClaudeStartupFlags != "" {
 						args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
@@ -939,8 +952,12 @@ func (m model) View() tea.View {
 
 func main() {
 	m := initialModel()
-	if _, err := tea.NewProgram(m).Run(); err != nil {
+	final, err := tea.NewProgram(m).Run()
+	if err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
+	}
+	if fm, ok := final.(model); ok && fm.exitMessage != "" {
+		fmt.Print(fm.exitMessage)
 	}
 }
