@@ -46,7 +46,10 @@ const (
 	dotTickRate    = 200 * time.Millisecond
 )
 
-var homeDir string
+var (
+	homeDir string
+	version = "dev"
+)
 
 type config struct {
 	IgnoreDirectories  []string `toml:"ignore_directories"`
@@ -1086,6 +1089,13 @@ func (m model) View() tea.View {
 }
 
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			fmt.Println(version)
+			return
+		}
+	}
+
 	m := initialModel()
 	final, err := tea.NewProgram(m).Run()
 	if err != nil {
