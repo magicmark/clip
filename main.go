@@ -15,6 +15,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	blevere "github.com/blevesearch/bleve/v2/analysis/tokenizer/regexp"
+	"github.com/blevesearch/bleve/v2/mapping"
 	index "github.com/blevesearch/bleve_index_api"
 	"github.com/bmatcuk/doublestar/v4"
 
@@ -32,6 +36,9 @@ const (
 	focusViewer
 
 	maxSearchResults = 10000
+
+	// Bump this when the index mapping/analyzer changes.
+	indexVersion = "2"
 )
 
 var homeDir string
@@ -456,20 +463,53 @@ type sessionDoc struct {
 	ModTime string `json:"mod_time"`
 }
 
+func newIndexMapping() *mapping.IndexMappingImpl {
+	im := bleve.NewIndexMapping()
+
+	im.AddCustomTokenizer("ws_tokenizer", map[string]interface{}{
+		"type":   blevere.Name,
+		"regexp": `\S+`,
+	})
+	im.AddCustomAnalyzer("code_friendly", map[string]interface{}{
+		"type":          custom.Name,
+		"tokenizer":     "ws_tokenizer",
+		"token_filters": []string{lowercase.Name},
+	})
+
+	docMapping := mapping.NewDocumentMapping()
+	for _, field := range []string{"title", "directory", "content", "path"} {
+		fm := mapping.NewTextFieldMapping()
+		fm.Analyzer = "code_friendly"
+		docMapping.AddFieldMappingsAt(field, fm)
+	}
+	im.DefaultMapping = docMapping
+	return im
+}
+
+func createNewIndex(path string) (bleve.Index, error) {
+	os.MkdirAll(filepath.Dir(path), 0755)
+	return bleve.New(path, newIndexMapping())
+}
+
 func openOrCreateIndex() (bleve.Index, error) {
-	indexPath := filepath.Join(homeDir, ".cache", "clips", "search.index")
+	cacheDir := filepath.Join(homeDir, ".cache", "clips")
+	indexPath := filepath.Join(cacheDir, "search.index")
+	versionPath := filepath.Join(cacheDir, "search.version")
+
+	if v, err := os.ReadFile(versionPath); err != nil || strings.TrimSpace(string(v)) != indexVersion {
+		os.RemoveAll(indexPath)
+	}
 
 	idx, err := bleve.Open(indexPath)
-	if err == bleve.ErrorIndexPathDoesNotExist {
-		os.MkdirAll(filepath.Dir(indexPath), 0755)
-		mapping := bleve.NewIndexMapping()
-		idx, err = bleve.New(indexPath, mapping)
+	if err != nil {
+		os.RemoveAll(indexPath)
+		idx, err = createNewIndex(indexPath)
 		if err != nil {
 			return nil, err
 		}
-		return idx, nil
+		os.WriteFile(versionPath, []byte(indexVersion), 0644)
 	}
-	return idx, err
+	return idx, nil
 }
 
 func syncIndex(idx bleve.Index, sessions []session) {
@@ -537,7 +577,7 @@ func searchSessions(idx bleve.Index, query string) (map[string]struct{}, []strin
 	matchedIDs := make(map[string]struct{})
 	var matchedTerms []string
 
-	q := bleve.NewQueryStringQuery(query)
+	q := bleve.NewWildcardQuery("*" + strings.ToLower(strings.TrimSpace(query)) + "*")
 	req := bleve.NewSearchRequest(q)
 	req.Size = maxSearchResults
 	req.Fields = []string{}
@@ -617,7 +657,7 @@ func initialModel() model {
 
 	si := textinput.New()
 	si.Prompt = " / "
-	si.Placeholder = "Filter sessions..."
+	si.Placeholder = "Filter sessions (titles only — building full-text index...)"
 	si.KeyMap.AcceptSuggestion = key.NewBinding(key.WithDisabled())
 
 	allIndices := make([]int, len(sessions))
@@ -670,6 +710,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case indexReadyMsg:
 		m.index = msg.index
+		if m.index != nil {
+			m.search.Placeholder = "Search sessions..."
+		} else {
+			m.search.Placeholder = "Filter sessions (titles only)"
+		}
 		if m.search.Value() != "" {
 			m.filterRows()
 		}
