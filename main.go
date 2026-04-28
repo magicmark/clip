@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -39,6 +40,10 @@ const (
 
 	// Bump this when the index mapping/analyzer changes.
 	indexVersion = "2"
+
+	minSearchChars = 3
+	searchDebounce = 150 * time.Millisecond
+	dotTickRate    = 200 * time.Millisecond
 )
 
 var homeDir string
@@ -128,6 +133,9 @@ type model struct {
 	matchedIDs      map[string]struct{}
 	matchedTerms    []string
 	exitMessage     string
+	searchID        uint64
+	searching       bool
+	dotCount        int
 }
 
 func loadSessions() []session {
@@ -614,6 +622,23 @@ type indexReadyMsg struct {
 	index bleve.Index
 }
 
+type searchResultMsg struct {
+	id           uint64
+	matchedIDs   map[string]struct{}
+	matchedTerms []string
+}
+
+type searchTickMsg struct {
+	id uint64
+}
+
+type searchDebounceMsg struct {
+	id    uint64
+	query string
+}
+
+var nextSearchID atomic.Uint64
+
 func initialModel() model {
 	sessions := loadSessions()
 
@@ -716,9 +741,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.Placeholder = "Filter sessions (titles only)"
 		}
 		if m.search.Value() != "" {
-			m.filterRows()
+			return m, m.startSearch()
 		}
 		return m, nil
+
+	case searchDebounceMsg:
+		if msg.id != m.searchID {
+			return m, nil
+		}
+		return m, m.runAsyncSearch(msg.id, msg.query)
+
+	case searchResultMsg:
+		if msg.id != m.searchID {
+			return m, nil
+		}
+		m.searching = false
+		m.matchedIDs = msg.matchedIDs
+		m.matchedTerms = msg.matchedTerms
+		m.applyFullTextFilter()
+		return m, nil
+
+	case searchTickMsg:
+		if msg.id != m.searchID || !m.searching {
+			return m, nil
+		}
+		m.dotCount = (m.dotCount + 1) % 4
+		return m, tea.Tick(dotTickRate, func(time.Time) tea.Msg {
+			return searchTickMsg{id: msg.id}
+		})
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -808,7 +858,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.search, cmd = m.search.Update(msg)
 		cmds = append(cmds, cmd)
 		if m.search.Value() != prevValue {
-			m.filterRows()
+			cmds = append(cmds, m.startSearch())
 		}
 	case focusTable:
 		prevCursor := m.table.Cursor()
@@ -861,42 +911,77 @@ func (m *model) updateViewer() {
 	m.viewer.GotoTop()
 }
 
-func (m *model) filterRows() {
+func (m *model) startSearch() tea.Cmd {
 	query := strings.TrimSpace(m.search.Value())
+
 	if query == "" {
 		m.table.SetRows(m.allRows)
 		m.filteredIndices = m.allIndices()
 		m.matchedIDs = nil
 		m.matchedTerms = nil
+		m.searching = false
 		m.updateViewer()
-		return
+		return nil
 	}
 
-	if m.index == nil {
-		q := strings.ToLower(query)
-		var filtered []table.Row
-		var indices []int
-		for i, row := range m.allRows {
-			if strings.Contains(strings.ToLower(row[0]), q) {
-				filtered = append(filtered, row)
-				indices = append(indices, i)
-			}
+	m.applyTitleFilter(query)
+
+	if m.index == nil || len(query) < minSearchChars {
+		m.matchedIDs = nil
+		m.matchedTerms = nil
+		m.searching = false
+		return nil
+	}
+
+	id := nextSearchID.Add(1)
+	m.searchID = id
+	m.searching = true
+	m.dotCount = 0
+
+	return tea.Batch(
+		tea.Tick(searchDebounce, func(time.Time) tea.Msg {
+			return searchDebounceMsg{id: id, query: query}
+		}),
+		tea.Tick(dotTickRate, func(time.Time) tea.Msg {
+			return searchTickMsg{id: id}
+		}),
+	)
+}
+
+func (m *model) runAsyncSearch(id uint64, query string) tea.Cmd {
+	idx := m.index
+	return func() tea.Msg {
+		matchedIDs, matchedTerms := searchSessions(idx, query)
+		return searchResultMsg{
+			id:           id,
+			matchedIDs:   matchedIDs,
+			matchedTerms: matchedTerms,
 		}
-		m.table.SetRows(filtered)
-		m.filteredIndices = indices
-		m.updateViewer()
-		return
 	}
+}
 
-	matchedIDs, matchedTerms := searchSessions(m.index, query)
-	m.matchedIDs = matchedIDs
-	m.matchedTerms = matchedTerms
+func (m *model) applyTitleFilter(query string) {
+	q := strings.ToLower(query)
+	var filtered []table.Row
+	var indices []int
+	for i, row := range m.allRows {
+		if strings.Contains(strings.ToLower(row[0]), q) ||
+			strings.Contains(strings.ToLower(row[1]), q) {
+			filtered = append(filtered, row)
+			indices = append(indices, i)
+		}
+	}
+	m.table.SetRows(filtered)
+	m.filteredIndices = indices
+	m.updateViewer()
+}
 
+func (m *model) applyFullTextFilter() {
 	var filtered []table.Row
 	var indices []int
 	for i, row := range m.allRows {
 		if i < len(m.sessions) {
-			if _, ok := matchedIDs[m.sessions[i].id]; ok {
+			if _, ok := m.matchedIDs[m.sessions[i].id]; ok {
 				filtered = append(filtered, row)
 				indices = append(indices, i)
 			}
@@ -988,7 +1073,12 @@ func (m model) View() tea.View {
 	right := rightBorder.Render(m.viewer.View())
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	help := helpStyle.Render("  tab: switch pane • ↑/↓: navigate • ctrl+c: quit")
+	helpText := "  tab: switch pane • ↑/↓: navigate • ctrl+c: quit"
+	if m.searching {
+		dots := strings.Repeat(".", m.dotCount+1)
+		helpText += lipgloss.NewStyle().Foreground(accent).Render("  searching" + dots)
+	}
+	help := helpStyle.Render(helpText)
 
 	v := tea.NewView(searchBar + "\n" + panes + "\n" + help)
 	v.AltScreen = true
