@@ -14,8 +14,9 @@ mkdir -p "$DIST"
 
 echo "Building $VERSION..."
 
-GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o "$DIST/clip-darwin-arm64"   .
-GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o "$DIST/clip-linux-amd64"    .
+LDFLAGS="-s -w -X main.version=${VERSION}"
+GOOS=darwin  GOARCH=arm64 go build -ldflags="$LDFLAGS" -o "$DIST/clip-darwin-arm64"   .
+GOOS=linux   GOARCH=amd64 go build -ldflags="$LDFLAGS" -o "$DIST/clip-linux-amd64"    .
 
 echo "Creating GitHub release $VERSION..."
 
