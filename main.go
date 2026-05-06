@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -270,10 +271,10 @@ func truncate(s string, max int) string {
 }
 
 var (
-	skillPrefix    = "Base directory for this skill: "
-	reCommandName  = regexp.MustCompile(`<command-name>/([^<]+)</command-name>`)
-	reCommandArgs  = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
-	reCommandMsg   = regexp.MustCompile(`<command-message>[^<]*</command-message>`)
+	skillPrefix   = "Base directory for this skill: "
+	reCommandName = regexp.MustCompile(`<command-name>/([^<]+)</command-name>`)
+	reCommandArgs = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
+	reCommandMsg  = regexp.MustCompile(`<command-message>[^<]*</command-message>`)
 )
 
 func normalizeCommands(text string) string {
@@ -621,6 +622,70 @@ func searchSessions(idx bleve.Index, query string) (map[string]struct{}, []strin
 	return matchedIDs, matchedTerms
 }
 
+func searchLoadedSessions(sessions []session, query string) (map[string]struct{}, []string) {
+	matchedIDs := make(map[string]struct{})
+	q := normalizedSearchQuery(query)
+	if q == "" {
+		return matchedIDs, nil
+	}
+
+	for _, s := range sessions {
+		if sessionContains(s, q) {
+			matchedIDs[s.id] = struct{}{}
+		}
+	}
+	if len(matchedIDs) == 0 {
+		return matchedIDs, nil
+	}
+	return matchedIDs, []string{q}
+}
+
+func normalizedSearchQuery(query string) string {
+	return strings.ToLower(strings.TrimSpace(query))
+}
+
+func sessionContains(s session, lowerQuery string) bool {
+	for _, value := range []string{s.id, s.title, s.directory, s.path} {
+		if strings.Contains(strings.ToLower(value), lowerQuery) {
+			return true
+		}
+	}
+	for _, m := range s.messages {
+		if strings.Contains(strings.ToLower(m.content), lowerQuery) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeSearchResults(
+	ids map[string]struct{},
+	terms []string,
+	extraIDs map[string]struct{},
+	extraTerms []string,
+) (map[string]struct{}, []string) {
+	if ids == nil {
+		ids = make(map[string]struct{})
+	}
+	for id := range extraIDs {
+		ids[id] = struct{}{}
+	}
+
+	seenTerms := make(map[string]struct{}, len(terms)+len(extraTerms))
+	for _, term := range terms {
+		seenTerms[strings.ToLower(term)] = struct{}{}
+	}
+	for _, term := range extraTerms {
+		key := strings.ToLower(term)
+		if _, ok := seenTerms[key]; ok {
+			continue
+		}
+		terms = append(terms, term)
+		seenTerms[key] = struct{}{}
+	}
+	return ids, terms
+}
+
 type indexReadyMsg struct {
 	index bleve.Index
 }
@@ -629,6 +694,7 @@ type searchResultMsg struct {
 	id           uint64
 	matchedIDs   map[string]struct{}
 	matchedTerms []string
+	sessions     []session
 }
 
 type searchTickMsg struct {
@@ -652,15 +718,7 @@ func initialModel() model {
 		{Title: "Date", Width: 12},
 	}
 
-	rows := make([]table.Row, len(sessions))
-	for i, s := range sessions {
-		rows[i] = table.Row{
-			s.title,
-			shortenDir(s.directory),
-			fmt.Sprintf("%d", s.turns),
-			relativeTime(s.date),
-		}
-	}
+	rows := sessionRows(sessions)
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -703,6 +761,19 @@ func initialModel() model {
 		focus:           focusSearch,
 		selectedIdx:     -1,
 	}
+}
+
+func sessionRows(sessions []session) []table.Row {
+	rows := make([]table.Row, len(sessions))
+	for i, s := range sessions {
+		rows[i] = table.Row{
+			s.title,
+			shortenDir(s.directory),
+			fmt.Sprintf("%d", s.turns),
+			relativeTime(s.date),
+		}
+	}
+	return rows
 }
 
 var (
@@ -758,6 +829,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.id != m.searchID {
 			return m, nil
 		}
+		m.sessions = msg.sessions
+		m.allRows = sessionRows(m.sessions)
 		m.searching = false
 		m.matchedIDs = msg.matchedIDs
 		m.matchedTerms = msg.matchedTerms
@@ -929,7 +1002,7 @@ func (m *model) startSearch() tea.Cmd {
 
 	m.applyTitleFilter(query)
 
-	if m.index == nil || len(query) < minSearchChars {
+	if len(query) < minSearchChars {
 		m.matchedIDs = nil
 		m.matchedTerms = nil
 		m.searching = false
@@ -954,11 +1027,21 @@ func (m *model) startSearch() tea.Cmd {
 func (m *model) runAsyncSearch(id uint64, query string) tea.Cmd {
 	idx := m.index
 	return func() tea.Msg {
-		matchedIDs, matchedTerms := searchSessions(idx, query)
+		sessions := loadSessions()
+
+		matchedIDs := make(map[string]struct{})
+		var matchedTerms []string
+		if idx != nil {
+			matchedIDs, matchedTerms = searchSessions(idx, query)
+		}
+		loadedIDs, loadedTerms := searchLoadedSessions(sessions, query)
+		matchedIDs, matchedTerms = mergeSearchResults(matchedIDs, matchedTerms, loadedIDs, loadedTerms)
+
 		return searchResultMsg{
 			id:           id,
 			matchedIDs:   matchedIDs,
 			matchedTerms: matchedTerms,
+			sessions:     sessions,
 		}
 	}
 }
@@ -1089,11 +1172,26 @@ func (m model) View() tea.View {
 }
 
 func main() {
-	for _, arg := range os.Args[1:] {
-		if arg == "--version" || arg == "-v" {
-			fmt.Println(version)
-			return
-		}
+	var searchQuery string
+	var showVersion bool
+
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	flags.BoolVar(&showVersion, "version", false, "print version")
+	flags.BoolVar(&showVersion, "v", false, "print version")
+	flags.StringVar(&searchQuery, "s", "", "search sessions and print matches")
+	flags.StringVar(&searchQuery, "search", "", "search sessions and print matches")
+	flags.Usage = func() {
+		fmt.Fprintf(flags.Output(), "Usage: %s [-s query]\n", filepath.Base(os.Args[0]))
+		flags.PrintDefaults()
+	}
+	flags.Parse(os.Args[1:])
+
+	if showVersion {
+		fmt.Println(version)
+		return
+	}
+	if searchQuery != "" {
+		os.Exit(runSearchCLI(searchQuery, os.Stdout))
 	}
 
 	m := initialModel()
