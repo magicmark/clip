@@ -130,6 +130,91 @@ func TestSearchMatchesMessageBodies(t *testing.T) {
 	}
 }
 
+func TestSearchLoadedSessionsMatchesUnindexedBody(t *testing.T) {
+	sessions := []session{
+		{
+			id:    "session-live",
+			title: "ticket cleanup",
+			messages: []chatMessage{
+				{role: "user", content: "Stop being so sloppy."},
+			},
+		},
+		{
+			id:    "session-other",
+			title: "unrelated",
+			messages: []chatMessage{
+				{role: "user", content: "hello world"},
+			},
+		},
+	}
+
+	matchedIDs, matchedTerms := searchLoadedSessions(sessions, "sloppy")
+	if _, ok := matchedIDs["session-live"]; !ok {
+		t.Fatalf("expected session-live to match loaded message body")
+	}
+	if _, ok := matchedIDs["session-other"]; ok {
+		t.Fatalf("did not expect session-other to match")
+	}
+	if len(matchedTerms) != 1 || matchedTerms[0] != "sloppy" {
+		t.Fatalf("expected sloppy matched term, got %v", matchedTerms)
+	}
+}
+
+func TestAsyncSearchReloadsSessionsFromDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := homeDir
+	homeDir = tmpDir
+	t.Cleanup(func() { homeDir = origHome })
+
+	projectDir := filepath.Join(tmpDir, ".claude", "projects", "-tmp-liveproject")
+	os.MkdirAll(projectDir, 0755)
+	path := writeTestSession(t, projectDir, "session-live", "/tmp/liveproject", []chatMessage{
+		{role: "user", content: "initial request"},
+		{role: "assistant", content: "initial response"},
+	})
+
+	sessionsBefore := loadSessions()
+	if len(sessionsBefore) != 1 {
+		t.Fatalf("expected 1 session before append, got %d", len(sessionsBefore))
+	}
+	if sessionContains(sessionsBefore[0], "sloppy") {
+		t.Fatalf("test setup unexpectedly contains sloppy before append")
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := json.NewEncoder(f)
+	err = enc.Encode(map[string]interface{}{
+		"type":      "user",
+		"timestamp": time.Now().Format(time.RFC3339),
+		"message": map[string]interface{}{
+			"role":    "user",
+			"content": "Stop being so sloppy.",
+		},
+	})
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{sessions: sessionsBefore}
+	msg := m.runAsyncSearch(7, "sloppy")().(searchResultMsg)
+
+	if msg.id != 7 {
+		t.Fatalf("expected search id 7, got %d", msg.id)
+	}
+	if _, ok := msg.matchedIDs["session-live"]; !ok {
+		t.Fatalf("expected reloaded session to match appended body text")
+	}
+	if len(msg.sessions) != 1 || msg.sessions[0].turns != 2 {
+		t.Fatalf("expected reloaded session with 2 turns, got %#v", msg.sessions)
+	}
+}
+
 func TestSearchMatchesUnderscoreTerms(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectDir := filepath.Join(tmpDir, ".claude", "projects", "-tmp-codeproject")
