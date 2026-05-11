@@ -20,6 +20,7 @@ func TestLoadConfig(t *testing.T) {
 	os.WriteFile(configPath, []byte(`
 ignore_directories = ["/tmp/secret", "/home/*/private"]
 claude_startup_flags = "--dangerously-skip-permissions"
+codex_startup_flags = "--sandbox workspace-write --ask-for-approval on-request"
 `), 0644)
 
 	c := loadConfig()
@@ -36,6 +37,9 @@ claude_startup_flags = "--dangerously-skip-permissions"
 	if c.ClaudeStartupFlags != "--dangerously-skip-permissions" {
 		t.Errorf("expected --dangerously-skip-permissions, got %s", c.ClaudeStartupFlags)
 	}
+	if c.CodexStartupFlags != "--sandbox workspace-write --ask-for-approval on-request" {
+		t.Errorf("expected Codex startup flags, got %s", c.CodexStartupFlags)
+	}
 }
 
 func TestLoadConfigMissing(t *testing.T) {
@@ -51,6 +55,9 @@ func TestLoadConfigMissing(t *testing.T) {
 	}
 	if c.ClaudeStartupFlags != "" {
 		t.Errorf("expected empty flags, got %s", c.ClaudeStartupFlags)
+	}
+	if c.CodexStartupFlags != "" {
+		t.Errorf("expected empty Codex flags, got %s", c.CodexStartupFlags)
 	}
 }
 
@@ -123,29 +130,46 @@ ignore_directories = ["relative/path"]
 	}
 }
 
-func TestClaudeStartupFlagsArgs(t *testing.T) {
-	tests := []struct {
-		flags string
-		want  []string
-	}{
-		{"--dangerously-skip-permissions", []string{"--resume", "abc123", "--dangerously-skip-permissions"}},
-		{"--dangerously-skip-permissions --verbose", []string{"--resume", "abc123", "--dangerously-skip-permissions", "--verbose"}},
-		{"", []string{"--resume", "abc123"}},
+func TestResumeArgsUseSourceSpecificStartupFlags(t *testing.T) {
+	origCfg := cfg
+	cfg = config{
+		ClaudeStartupFlags: "--dangerously-skip-permissions --verbose",
+		CodexStartupFlags:  "--sandbox workspace-write --ask-for-approval on-request",
 	}
+	t.Cleanup(func() { cfg = origCfg })
 
-	for _, tt := range tests {
-		args := []string{"--resume", "abc123"}
-		if tt.flags != "" {
-			args = append(args, strings.Fields(tt.flags)...)
-		}
-		if len(args) != len(tt.want) {
-			t.Errorf("flags=%q: got %d args, want %d", tt.flags, len(args), len(tt.want))
-			continue
-		}
-		for i := range args {
-			if args[i] != tt.want[i] {
-				t.Errorf("flags=%q: args[%d]=%q, want %q", tt.flags, i, args[i], tt.want[i])
-			}
+	assertStringSlice(t, resumeArgs(session{id: "abc123"}), []string{
+		"--resume",
+		"abc123",
+		"--dangerously-skip-permissions",
+		"--verbose",
+	})
+	assertStringSlice(t, resumeArgs(session{source: sourceCodex, id: "def456"}), []string{
+		"resume",
+		"def456",
+		"--sandbox",
+		"workspace-write",
+		"--ask-for-approval",
+		"on-request",
+	})
+}
+
+func TestResumeArgsOmitMissingCodexStartupFlags(t *testing.T) {
+	origCfg := cfg
+	cfg = config{}
+	t.Cleanup(func() { cfg = origCfg })
+
+	assertStringSlice(t, resumeArgs(session{source: sourceCodex, id: "def456"}), []string{"resume", "def456"})
+}
+
+func assertStringSlice(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d args %v, want %d args %v", len(got), got, len(want), want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("args[%d]=%q, want %q; full args=%v", i, got[i], want[i], got)
 		}
 	}
 }
@@ -221,5 +245,39 @@ func TestLoadSessionsIgnoresDirectories(t *testing.T) {
 	}
 	if kept[1].title != "also keep" {
 		t.Errorf("expected 'also keep', got %q", kept[1].title)
+	}
+}
+
+func TestFormatConversationUsesCodexLabelAndHighlights(t *testing.T) {
+	s := session{
+		source: sourceCodex,
+		messages: []chatMessage{
+			{role: "user", content: "Find the needle"},
+			{role: "assistant", content: "The needle is here"},
+		},
+	}
+
+	got := stripANSI(formatConversation(s, []string{"needle"}))
+	for _, want := range []string{
+		"You:",
+		"Codex:",
+		"Find the needle",
+		"The needle is here",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected formatted conversation to contain %q, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestStripCodexSyntheticBlocks(t *testing.T) {
+	input := "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>\n\n" +
+		"Please continue the parser fix.\n\n" +
+		"<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>\n"
+
+	got := stripCodexSyntheticBlocks(input)
+	want := "Please continue the parser fix."
+	if got != want {
+		t.Fatalf("stripCodexSyntheticBlocks() = %q, want %q", got, want)
 	}
 }

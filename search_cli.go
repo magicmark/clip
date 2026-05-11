@@ -31,7 +31,7 @@ func runSearchCLI(query string, w io.Writer) int {
 
 	var matches []session
 	for _, s := range sessions {
-		if _, ok := matchedIDs[s.id]; !ok {
+		if _, ok := matchedIDs[s.searchKey()]; !ok {
 			continue
 		}
 		matches = append(matches, s)
@@ -39,13 +39,21 @@ func runSearchCLI(query string, w io.Writer) int {
 
 	fmt.Fprintln(w, searchCLIHeader.Render(searchSummary(len(matches), query)))
 	for i, s := range matches {
+		marker := fmt.Sprintf("%d.", i+1)
+		metadataIndent := strings.Repeat(" ", lipgloss.Width(marker)+1)
+
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%s %s\n", searchCLIMuted.Render(fmt.Sprintf("%d.", i+1)), searchCLITitle.Render(s.title))
-		fmt.Fprintf(w, "   %s  %s\n", searchCLILabel.Render("Directory"), searchCLIPath.Render(displayDirectory(s.directory)))
-		fmt.Fprintf(w, "   %s      %s\n", searchCLILabel.Render("Match"), highlightMatches(sessionSnippet(s, query), query))
-		fmt.Fprintf(w, "   %s    %s\n", searchCLILabel.Render("Command"), searchCLICmd.Render(resumeCommand(s)))
+		fmt.Fprintf(w, "%s %s\n", searchCLIMuted.Render(marker), searchCLITitle.Render(s.title))
+		printSearchCLIMetadata(w, metadataIndent, "Source", searchCLIPath.Render(s.sourceLabel()))
+		printSearchCLIMetadata(w, metadataIndent, "Directory", searchCLIPath.Render(displayDirectory(s.directory)))
+		printSearchCLIMetadata(w, metadataIndent, "Match", highlightSnippet(sessionSnippet(s, query), query))
+		printSearchCLIMetadata(w, metadataIndent, "Command", searchCLICmd.Render(resumeCommand(s)))
 	}
 	return 0
+}
+
+func printSearchCLIMetadata(w io.Writer, indent, label, value string) {
+	fmt.Fprintf(w, "%s%s  %s\n", indent, searchCLILabel.Render(fmt.Sprintf("%-9s", label)), value)
 }
 
 func searchSummary(matches int, query string) string {
@@ -70,8 +78,8 @@ func sessionSnippet(s session, query string) string {
 	}{
 		{"Title:", s.title},
 		{"Directory:", s.directory},
-		{"Path:", s.path},
-		{"ID:", s.id},
+		{"Path:", searchableSessionPath(s)},
+		{"ID:", s.rawID()},
 	}
 	for _, candidate := range candidates {
 		if snippet, ok := matchingSnippet(candidate.label, candidate.text, q); ok {
@@ -79,7 +87,7 @@ func sessionSnippet(s session, query string) string {
 		}
 	}
 	for _, m := range s.messages {
-		label := "Claude:"
+		label := s.sourceLabel() + ":"
 		if m.role == "user" {
 			label = "You:"
 		}
@@ -123,6 +131,15 @@ func highlightMatches(text, query string) string {
 		pos = end
 	}
 	return b.String()
+}
+
+func highlightSnippet(text, query string) string {
+	idx := strings.Index(text, ": ")
+	if idx < 0 {
+		return highlightMatches(text, query)
+	}
+	prefixEnd := idx + len(": ")
+	return text[:prefixEnd] + highlightMatches(text[prefixEnd:], query)
 }
 
 func snippetAroundMatch(text, lowerQuery string, contextWords int) string {
@@ -176,10 +193,7 @@ func snippetAroundMatch(text, lowerQuery string, contextWords int) string {
 }
 
 func resumeCommand(s session) string {
-	args := []string{"claude", "--resume", s.id}
-	if cfg.ClaudeStartupFlags != "" {
-		args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
-	}
+	args := append([]string{resumeExecutable(s)}, resumeArgs(s)...)
 	for i, arg := range args {
 		args[i] = shellQuote(arg)
 	}
