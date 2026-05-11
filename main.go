@@ -40,7 +40,7 @@ const (
 	maxSearchResults = 10000
 
 	// Bump this when the index mapping/analyzer changes.
-	indexVersion = "2"
+	indexVersion = "5"
 
 	minSearchChars = 3
 	searchDebounce = 150 * time.Millisecond
@@ -55,6 +55,7 @@ var (
 type config struct {
 	IgnoreDirectories  []string `toml:"ignore_directories"`
 	ClaudeStartupFlags string   `toml:"claude_startup_flags"`
+	CodexStartupFlags  string   `toml:"codex_startup_flags"`
 }
 
 var cfg config
@@ -95,6 +96,7 @@ func isIgnored(dir string) bool {
 }
 
 type session struct {
+	source    sessionSource
 	id        string
 	path      string
 	title     string
@@ -109,16 +111,126 @@ type chatMessage struct {
 	content string
 }
 
+type sessionSource string
+
+const (
+	sourceClaude sessionSource = "claude"
+	sourceCodex  sessionSource = "codex"
+)
+
+func (s session) sessionSource() sessionSource {
+	if s.source == "" {
+		return sourceClaude
+	}
+	return s.source
+}
+
+func (s session) sourceLabel() string {
+	switch s.sessionSource() {
+	case sourceCodex:
+		return "Codex"
+	default:
+		return "Claude"
+	}
+}
+
+func (s session) rawID() string {
+	return s.id
+}
+
+func (s session) searchKey() string {
+	return string(s.sessionSource()) + ":" + s.rawID()
+}
+
+func searchableSessionPath(s session) string {
+	var base string
+	switch s.sessionSource() {
+	case sourceCodex:
+		base = filepath.Join(homeDir, ".codex", "sessions")
+	default:
+		base = filepath.Join(homeDir, ".claude", "projects")
+	}
+	rel, err := filepath.Rel(base, s.path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return s.path
+	}
+	return rel
+}
+
+func resumeExecutable(s session) string {
+	if s.sessionSource() == sourceCodex {
+		return "codex"
+	}
+	return "claude"
+}
+
+func resumeArgs(s session) []string {
+	if s.sessionSource() == sourceCodex {
+		args := []string{"resume", s.rawID()}
+		if cfg.CodexStartupFlags != "" {
+			args = append(args, strings.Fields(cfg.CodexStartupFlags)...)
+		}
+		return args
+	}
+
+	args := []string{"--resume", s.rawID()}
+	if cfg.ClaudeStartupFlags != "" {
+		args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
+	}
+	return args
+}
+
+func missingDirectoryMessage(s session) string {
+	return fmt.Sprintf(
+		"\nThe original directory for this session no longer exists:\n  %s\n\n"+
+			"The session transcript is still available at:\n  %s\n\n"+
+			"To recover this session, start %s and paste this prompt:\n\n"+
+			"  Read the file %s — it's a JSONL transcript of a previous conversation. Summarize what we were working on and continue where we left off.\n",
+		s.directory, s.path, resumeExecutable(s), s.path,
+	)
+}
+
+func sessionTitleFilterContains(s session, lowerQuery string) bool {
+	for _, value := range []string{s.title, s.directory} {
+		if strings.Contains(strings.ToLower(value), lowerQuery) {
+			return true
+		}
+	}
+	return false
+}
+
 type jsonlRecord struct {
-	Type      string    `json:"type"`
-	Timestamp string    `json:"timestamp"`
-	CWD       string    `json:"cwd"`
-	Message   *msgField `json:"message"`
+	Type      string      `json:"type"`
+	Timestamp string      `json:"timestamp"`
+	CWD       string      `json:"cwd"`
+	Message   *msgField   `json:"message"`
+	Origin    originField `json:"origin"`
 }
 
 type msgField struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
+}
+
+type originField struct {
+	Kind string `json:"kind"`
+}
+
+type codexJSONLRecord struct {
+	Type      string       `json:"type"`
+	Timestamp string       `json:"timestamp"`
+	Payload   codexPayload `json:"payload"`
+}
+
+type codexPayload struct {
+	ID        string      `json:"id"`
+	CWD       string      `json:"cwd"`
+	Timestamp string      `json:"timestamp"`
+	Type      string      `json:"type"`
+	Role      string      `json:"role"`
+	Text      string      `json:"text"`
+	Message   interface{} `json:"message"`
+	Content   interface{} `json:"content"`
 }
 
 type model struct {
@@ -143,8 +255,18 @@ type model struct {
 }
 
 func loadSessions() []session {
-	base := filepath.Join(homeDir, ".claude", "projects")
+	sessions := append(loadClaudeSessions(), loadCodexSessions()...)
+	sessions = filterValidSessions(sessions)
 
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].date.After(sessions[j].date)
+	})
+
+	return sessions
+}
+
+func loadClaudeSessions() []session {
+	base := filepath.Join(homeDir, ".claude", "projects")
 	var files []string
 	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -162,20 +284,43 @@ func loadSessions() []session {
 	var sessions []session
 	for _, f := range files {
 		s := parseSession(f)
+		sessions = append(sessions, s)
+	}
+	return sessions
+}
+
+func loadCodexSessions() []session {
+	base := filepath.Join(homeDir, ".codex", "sessions")
+	var files []string
+	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	var sessions []session
+	for _, f := range files {
+		sessions = append(sessions, parseCodexSession(f))
+	}
+	return sessions
+}
+
+func filterValidSessions(sessions []session) []session {
+	var kept []session
+	for _, s := range sessions {
 		if s.title == "" {
 			continue
 		}
 		if s.directory != "" && isIgnored(s.directory) {
 			continue
 		}
-		sessions = append(sessions, s)
+		kept = append(kept, s)
 	}
-
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].date.After(sessions[j].date)
-	})
-
-	return sessions
+	return kept
 }
 
 func parseSession(path string) session {
@@ -186,8 +331,9 @@ func parseSession(path string) session {
 	defer f.Close()
 
 	s := session{
-		id:   strings.TrimSuffix(filepath.Base(path), ".jsonl"),
-		path: path,
+		source: sourceClaude,
+		id:     strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		path:   path,
 	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 4096), 10*1024*1024)
@@ -202,13 +348,7 @@ func parseSession(path string) session {
 			s.directory = rec.CWD
 		}
 
-		if rec.Timestamp != "" {
-			if t, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
-				if t.After(s.date) {
-					s.date = t
-				}
-			}
-		}
+		s.updateDate(rec.Timestamp)
 
 		if rec.Type != "user" && rec.Type != "assistant" {
 			continue
@@ -219,6 +359,9 @@ func parseSession(path string) session {
 
 		text := strings.TrimSpace(extractText(rec.Message.Content))
 		if text == "" {
+			continue
+		}
+		if rec.Origin.Kind == "task-notification" || isClaudeTaskNotification(text) {
 			continue
 		}
 
@@ -241,6 +384,144 @@ func parseSession(path string) session {
 	return s
 }
 
+func parseCodexSession(path string) session {
+	f, err := os.Open(path)
+	if err != nil {
+		return session{}
+	}
+	defer f.Close()
+
+	s := session{
+		source: sourceCodex,
+		id:     strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		path:   path,
+	}
+	seenMessages := make(map[string]struct{})
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 4096), 10*1024*1024)
+
+	for scanner.Scan() {
+		var rec codexJSONLRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+
+		s.updateDate(rec.Timestamp)
+		s.updateDate(rec.Payload.Timestamp)
+
+		switch rec.Type {
+		case "session_meta":
+			if rec.Payload.ID != "" {
+				s.id = rec.Payload.ID
+			}
+			if rec.Payload.CWD != "" {
+				s.directory = rec.Payload.CWD
+			}
+		case "turn_context":
+			if s.directory == "" && rec.Payload.CWD != "" {
+				s.directory = rec.Payload.CWD
+			}
+		case "response_item":
+			if rec.Payload.Type != "message" {
+				continue
+			}
+			s.appendCodexMessage(rec.Payload.Role, extractText(rec.Payload.Content), seenMessages)
+		default:
+			eventType := rec.Type
+			if rec.Type == "event_msg" && rec.Payload.Type != "" {
+				eventType = rec.Payload.Type
+			}
+			switch eventType {
+			case "user_message":
+				s.appendCodexMessage("user", codexEventText(rec.Payload), seenMessages)
+			case "agent_message":
+				s.appendCodexMessage("assistant", codexEventText(rec.Payload), seenMessages)
+			}
+		}
+	}
+
+	if s.date.IsZero() {
+		if info, err := os.Stat(path); err == nil {
+			s.date = info.ModTime()
+		}
+	}
+
+	return s
+}
+
+func (s *session) updateDate(timestamp string) {
+	if timestamp == "" {
+		return
+	}
+	t, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return
+	}
+	if t.After(s.date) {
+		s.date = t
+	}
+}
+
+func (s *session) appendCodexMessage(role, text string, seen map[string]struct{}) {
+	if role != "user" && role != "assistant" {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	text = stripCodexSyntheticBlocks(text)
+	if text == "" {
+		return
+	}
+	text = stripSkillContent(text)
+	text = normalizeCommands(text)
+
+	key := role + "\x00" + text
+	if _, ok := seen[key]; ok {
+		return
+	}
+	seen[key] = struct{}{}
+
+	if role == "user" {
+		s.turns++
+		if s.title == "" {
+			s.title = truncate(text, 120)
+		}
+	}
+
+	s.messages = append(s.messages, chatMessage{
+		role:    role,
+		content: text,
+	})
+}
+
+func codexEventText(payload codexPayload) string {
+	for _, candidate := range []string{
+		extractText(payload.Message),
+		payload.Text,
+		extractText(payload.Content),
+	} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+var codexSyntheticBlockPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)<environment_context>\s*.*?</environment_context>\s*`),
+	regexp.MustCompile(`(?s)<skill>\s*.*?</skill>\s*`),
+	regexp.MustCompile(`(?s)<turn_aborted>\s*.*?</turn_aborted>\s*`),
+}
+
+func stripCodexSyntheticBlocks(text string) string {
+	for _, pattern := range codexSyntheticBlockPatterns {
+		text = pattern.ReplaceAllString(text, "")
+	}
+	return strings.TrimSpace(text)
+}
+
 func extractText(content interface{}) string {
 	switch v := content.(type) {
 	case string:
@@ -249,7 +530,8 @@ func extractText(content interface{}) string {
 		var parts []string
 		for _, item := range v {
 			if m, ok := item.(map[string]interface{}); ok {
-				if m["type"] == "text" {
+				switch m["type"] {
+				case "text", "input_text", "output_text":
 					if t, ok := m["text"].(string); ok {
 						parts = append(parts, t)
 					}
@@ -257,6 +539,15 @@ func extractText(content interface{}) string {
 			}
 		}
 		return strings.Join(parts, " ")
+	case map[string]interface{}:
+		for _, key := range []string{"text", "message"} {
+			if t, ok := v[key].(string); ok {
+				return t
+			}
+		}
+		if c, ok := v["content"]; ok {
+			return extractText(c)
+		}
 	}
 	return ""
 }
@@ -276,6 +567,10 @@ var (
 	reCommandArgs = regexp.MustCompile(`<command-args>([^<]*)</command-args>`)
 	reCommandMsg  = regexp.MustCompile(`<command-message>[^<]*</command-message>`)
 )
+
+func isClaudeTaskNotification(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "<task-notification>")
+}
 
 func normalizeCommands(text string) string {
 	name := reCommandName.FindStringSubmatch(text)
@@ -332,16 +627,16 @@ var (
 	highlightStyle = lipgloss.NewStyle().Background(highlightColor).Foreground(base03)
 )
 
-func formatConversation(msgs []chatMessage, terms []string) string {
+func formatConversation(s session, terms []string) string {
 	var b strings.Builder
-	for _, m := range msgs {
+	for _, m := range s.messages {
 		text := normalizeText(m.content)
 		if m.role == "user" {
 			b.WriteString(previewYou.Render("You:"))
 			b.WriteString("\n")
 			b.WriteString(styledHighlight(text, terms, previewUser))
 		} else {
-			b.WriteString(previewClaude.Render("Claude:"))
+			b.WriteString(previewClaude.Render(s.sourceLabel() + ":"))
 			b.WriteString("\n")
 			b.WriteString(styledHighlight(text, terms, previewAsst))
 		}
@@ -527,7 +822,7 @@ func openOrCreateIndex() (bleve.Index, error) {
 func syncIndex(idx bleve.Index, sessions []session) {
 	currentIDs := make(map[string]struct{})
 	for _, s := range sessions {
-		currentIDs[s.id] = struct{}{}
+		currentIDs[s.searchKey()] = struct{}{}
 	}
 
 	for _, s := range sessions {
@@ -537,7 +832,7 @@ func syncIndex(idx bleve.Index, sessions []session) {
 		}
 		modTime := info.ModTime().Format(time.RFC3339)
 
-		doc, err := idx.Document(s.id)
+		doc, err := idx.Document(s.searchKey())
 		if err == nil && doc != nil {
 			var existingModTime string
 			doc.VisitFields(func(f index.Field) {
@@ -552,20 +847,15 @@ func syncIndex(idx bleve.Index, sessions []session) {
 
 		var content strings.Builder
 		for _, m := range s.messages {
-			if m.role == "user" {
-				content.WriteString("You: ")
-			} else {
-				content.WriteString("Claude: ")
-			}
 			content.WriteString(m.content)
 			content.WriteString("\n")
 		}
 
-		idx.Index(s.id, sessionDoc{
+		idx.Index(s.searchKey(), sessionDoc{
 			Title:   s.title,
 			Dir:     s.directory,
 			Content: content.String(),
-			Path:    s.path,
+			Path:    searchableSessionPath(s),
 			ModTime: modTime,
 		})
 	}
@@ -631,7 +921,7 @@ func searchLoadedSessions(sessions []session, query string) (map[string]struct{}
 
 	for _, s := range sessions {
 		if sessionContains(s, q) {
-			matchedIDs[s.id] = struct{}{}
+			matchedIDs[s.searchKey()] = struct{}{}
 		}
 	}
 	if len(matchedIDs) == 0 {
@@ -645,7 +935,7 @@ func normalizedSearchQuery(query string) string {
 }
 
 func sessionContains(s session, lowerQuery string) bool {
-	for _, value := range []string{s.id, s.title, s.directory, s.path} {
+	for _, value := range []string{s.rawID(), s.title, s.directory, searchableSessionPath(s)} {
 		if strings.Contains(strings.ToLower(value), lowerQuery) {
 			return true
 		}
@@ -712,6 +1002,7 @@ func initialModel() model {
 	sessions := loadSessions()
 
 	columns := []table.Column{
+		{Title: "Source", Width: 6},
 		{Title: "Title", Width: 40},
 		{Title: "Directory", Width: 20},
 		{Title: "Turns", Width: 5},
@@ -767,6 +1058,7 @@ func sessionRows(sessions []session) []table.Row {
 	rows := make([]table.Row, len(sessions))
 	for i, s := range sessions {
 		rows[i] = table.Row{
+			s.sourceLabel(),
 			s.title,
 			shortenDir(s.directory),
 			fmt.Sprintf("%d", s.turns),
@@ -896,21 +1188,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if s := m.selectedSession(); s != nil {
 					if s.directory != "" {
 						if _, err := os.Stat(s.directory); os.IsNotExist(err) {
-							m.exitMessage = fmt.Sprintf(
-								"\nThe original directory for this session no longer exists:\n  %s\n\n"+
-									"The session transcript is still available at:\n  %s\n\n"+
-									"To recover this session, start claude and paste this prompt:\n\n"+
-									"  Read the file %s — it's a JSONL transcript of a previous conversation. Summarize what we were working on and continue where we left off.\n",
-								s.directory, s.path, s.path,
-							)
+							m.exitMessage = missingDirectoryMessage(*s)
 							return m, tea.Quit
 						}
 					}
-					args := []string{"--resume", s.id}
-					if cfg.ClaudeStartupFlags != "" {
-						args = append(args, strings.Fields(cfg.ClaudeStartupFlags)...)
-					}
-					c := exec.Command("claude", args...)
+					c := exec.Command(resumeExecutable(*s), resumeArgs(*s)...)
 					if s.directory != "" {
 						c.Dir = s.directory
 					}
@@ -983,7 +1265,7 @@ func (m *model) updateViewer() {
 	}
 	idx := m.filteredIndices[cursor]
 	m.selectedIdx = idx
-	m.viewer.SetContent(formatConversation(m.sessions[idx].messages, m.matchedTerms))
+	m.viewer.SetContent(formatConversation(m.sessions[idx], m.matchedTerms))
 	m.viewer.GotoTop()
 }
 
@@ -1051,8 +1333,7 @@ func (m *model) applyTitleFilter(query string) {
 	var filtered []table.Row
 	var indices []int
 	for i, row := range m.allRows {
-		if strings.Contains(strings.ToLower(row[0]), q) ||
-			strings.Contains(strings.ToLower(row[1]), q) {
+		if i < len(m.sessions) && sessionTitleFilterContains(m.sessions[i], q) {
 			filtered = append(filtered, row)
 			indices = append(indices, i)
 		}
@@ -1067,7 +1348,7 @@ func (m *model) applyFullTextFilter() {
 	var indices []int
 	for i, row := range m.allRows {
 		if i < len(m.sessions) {
-			if _, ok := m.matchedIDs[m.sessions[i].id]; ok {
+			if _, ok := m.matchedIDs[m.sessions[i].searchKey()]; ok {
 				filtered = append(filtered, row)
 				indices = append(indices, i)
 			}
@@ -1104,18 +1385,20 @@ func (m *model) updateSizes() {
 
 	// Distribute column widths: Title gets the lion's share
 	cols := m.table.Columns()
-	if len(cols) == 4 {
+	if len(cols) == 5 {
 		padding := len(cols) * 2 // Cell style has Padding(0,1) = 1 char each side
 		available := tableInner - padding
 		// Fixed widths for Turns and Date
+		sourceW := 6
 		turnsW := 5
 		dateW := 12
 		dirW := available / 4
-		titleW := available - turnsW - dateW - dirW
-		cols[0].Width = titleW
-		cols[1].Width = dirW
-		cols[2].Width = turnsW
-		cols[3].Width = dateW
+		titleW := available - sourceW - turnsW - dateW - dirW
+		cols[0].Width = sourceW
+		cols[1].Width = titleW
+		cols[2].Width = dirW
+		cols[3].Width = turnsW
+		cols[4].Width = dateW
 		m.table.SetColumns(cols)
 	}
 
