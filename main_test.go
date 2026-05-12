@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -267,6 +269,47 @@ func TestFormatConversationUsesCodexLabelAndHighlights(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected formatted conversation to contain %q, got:\n%s", want, got)
 		}
+	}
+}
+
+func TestStatusBarShowsSelectedSessionIDOnRight(t *testing.T) {
+	m := model{
+		width: 72,
+		sessions: []session{
+			{id: "session-a"},
+			{id: "session-b"},
+		},
+		selectedIdx: 1,
+	}
+
+	got := stripANSI(m.statusBar("help"))
+	if !strings.HasPrefix(got, "help") {
+		t.Fatalf("expected status bar to keep help text on the left, got %q", got)
+	}
+	if !strings.HasSuffix(got, "session: session-b  ") {
+		t.Fatalf("expected selected session id on the right, got %q", got)
+	}
+	if lipgloss.Width(got) != m.width {
+		t.Fatalf("expected status bar width %d, got %d: %q", m.width, lipgloss.Width(got), got)
+	}
+}
+
+func TestStatusBarPrioritizesSessionIDWhenCrowded(t *testing.T) {
+	m := model{
+		width:       15,
+		sessions:    []session{{id: "abcdef1234567890"}},
+		selectedIdx: 0,
+	}
+
+	got := stripANSI(m.statusBar("a long help status"))
+	if strings.Contains(got, "help") {
+		t.Fatalf("expected crowded status bar to drop help text, got %q", got)
+	}
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, "1234567890  ") {
+		t.Fatalf("expected truncated selected session id, got %q", got)
+	}
+	if lipgloss.Width(got) != m.width {
+		t.Fatalf("expected status bar width %d, got %d: %q", m.width, lipgloss.Width(got), got)
 	}
 }
 

@@ -1081,7 +1081,9 @@ var (
 	searchBarInactive = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
 				BorderForeground(base01)
-	helpStyle = lipgloss.NewStyle().Foreground(base00)
+	helpStyle      = lipgloss.NewStyle().Foreground(base00)
+	sessionIDStyle = lipgloss.NewStyle().Foreground(base1)
+	searchingStyle = lipgloss.NewStyle().Foreground(accent)
 )
 
 func (m model) Init() tea.Cmd {
@@ -1445,13 +1447,72 @@ func (m model) View() tea.View {
 	helpText := "  tab: switch pane • ↑/↓: navigate • ctrl+c: quit"
 	if m.searching {
 		dots := strings.Repeat(".", m.dotCount+1)
-		helpText += lipgloss.NewStyle().Foreground(accent).Render("  searching" + dots)
+		helpText += searchingStyle.Render("  searching" + dots)
 	}
-	help := helpStyle.Render(helpText)
+	status := m.statusBar(helpText)
 
-	v := tea.NewView(searchBar + "\n" + panes + "\n" + help)
+	v := tea.NewView(searchBar + "\n" + panes + "\n" + status)
 	v.AltScreen = true
 	return v
+}
+
+func (m model) statusBar(helpText string) string {
+	left := helpStyle.Render(helpText)
+	var right string
+	if s := m.selectedSession(); s != nil {
+		if id := s.rawID(); id != "" {
+			right = truncateLeft("session: "+id+"  ", m.width)
+		}
+	}
+	if right == "" {
+		return left
+	}
+	return renderStatusBar(left, sessionIDStyle.Render(right), m.width)
+}
+
+func renderStatusBar(left, right string, width int) string {
+	if width <= 0 {
+		return left + "  " + right
+	}
+
+	rightW := lipgloss.Width(right)
+	if rightW >= width {
+		return lipgloss.PlaceHorizontal(width, lipgloss.Right, right)
+	}
+
+	leftW := lipgloss.Width(left)
+	gap := width - leftW - rightW
+	if gap < 1 {
+		return lipgloss.PlaceHorizontal(width, lipgloss.Right, right)
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func truncateLeft(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= maxWidth {
+		return text
+	}
+
+	runes := []rune(text)
+	if maxWidth <= 3 {
+		return string(runes[len(runes)-maxWidth:])
+	}
+
+	suffixWidth := maxWidth - 3
+	suffix := make([]rune, 0, suffixWidth)
+	width := 0
+	for i := len(runes) - 1; i >= 0; i-- {
+		w := lipgloss.Width(string(runes[i]))
+		if width+w > suffixWidth {
+			break
+		}
+		suffix = append([]rune{runes[i]}, suffix...)
+		width += w
+	}
+	return "..." + string(suffix)
 }
 
 func main() {
