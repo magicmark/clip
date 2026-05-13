@@ -314,7 +314,10 @@ func TestStatusBarPrioritizesSessionIDWhenCrowded(t *testing.T) {
 }
 
 func TestStripCodexSyntheticBlocks(t *testing.T) {
-	input := "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>\n\n" +
+	input := "# AGENTS.md instructions for /tmp/project\n\n" +
+		"<INSTRUCTIONS>\nDo not show these repo instructions.\n</INSTRUCTIONS>\n\n" +
+		"<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>\n\n" +
+		"<local-command-caveat>\nCaveat: ignore local command messages.\n</local-command-caveat>\n\n" +
 		"Please continue the parser fix.\n\n" +
 		"<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>\n"
 
@@ -322,5 +325,14 @@ func TestStripCodexSyntheticBlocks(t *testing.T) {
 	want := "Please continue the parser fix."
 	if got != want {
 		t.Fatalf("stripCodexSyntheticBlocks() = %q, want %q", got, want)
+	}
+}
+
+func TestStripCommonSyntheticBlocksRemovesLocalCommandCaveatTag(t *testing.T) {
+	input := `still seeing <local-command-caveat> in output`
+	got := stripCommonSyntheticBlocks(input)
+	want := "still seeing in output"
+	if got != want {
+		t.Fatalf("stripCommonSyntheticBlocks() = %q, want %q", got, want)
 	}
 }
