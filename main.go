@@ -39,8 +39,8 @@ const (
 
 	maxSearchResults = 10000
 
-	// Bump this when the index mapping/analyzer changes.
-	indexVersion = "5"
+	// Bump this when the index mapping/analyzer or indexed content cleanup changes.
+	indexVersion = "6"
 
 	minSearchChars = 3
 	searchDebounce = 150 * time.Millisecond
@@ -203,6 +203,7 @@ type jsonlRecord struct {
 	Type      string      `json:"type"`
 	Timestamp string      `json:"timestamp"`
 	CWD       string      `json:"cwd"`
+	IsMeta    bool        `json:"isMeta"`
 	Message   *msgField   `json:"message"`
 	Origin    originField `json:"origin"`
 }
@@ -353,11 +354,18 @@ func parseSession(path string) session {
 		if rec.Type != "user" && rec.Type != "assistant" {
 			continue
 		}
+		if rec.IsMeta {
+			continue
+		}
 		if rec.Message == nil {
 			continue
 		}
 
 		text := strings.TrimSpace(extractText(rec.Message.Content))
+		if text == "" {
+			continue
+		}
+		text = stripCommonSyntheticBlocks(text)
 		if text == "" {
 			continue
 		}
@@ -509,17 +517,34 @@ func codexEventText(payload codexPayload) string {
 	return ""
 }
 
-var codexSyntheticBlockPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?s)<environment_context>\s*.*?</environment_context>\s*`),
-	regexp.MustCompile(`(?s)<skill>\s*.*?</skill>\s*`),
-	regexp.MustCompile(`(?s)<turn_aborted>\s*.*?</turn_aborted>\s*`),
-}
+var (
+	commonSyntheticBlockPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?s)<local-command-caveat>\s*.*?</local-command-caveat>\s*`),
+		regexp.MustCompile(`</?local-command-caveat>\s*`),
+	}
 
-func stripCodexSyntheticBlocks(text string) string {
-	for _, pattern := range codexSyntheticBlockPatterns {
+	codexSyntheticBlockPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?s)# AGENTS\.md instructions for[^\n]*\s*<INSTRUCTIONS>\s*.*?</INSTRUCTIONS>\s*`),
+		regexp.MustCompile(`(?s)<environment_context>\s*.*?</environment_context>\s*`),
+		regexp.MustCompile(`(?s)<skill>\s*.*?</skill>\s*`),
+		regexp.MustCompile(`(?s)<turn_aborted>\s*.*?</turn_aborted>\s*`),
+	}
+)
+
+func stripSyntheticBlocks(text string, patterns []*regexp.Regexp) string {
+	for _, pattern := range patterns {
 		text = pattern.ReplaceAllString(text, "")
 	}
 	return strings.TrimSpace(text)
+}
+
+func stripCommonSyntheticBlocks(text string) string {
+	return stripSyntheticBlocks(text, commonSyntheticBlockPatterns)
+}
+
+func stripCodexSyntheticBlocks(text string) string {
+	text = stripCommonSyntheticBlocks(text)
+	return stripSyntheticBlocks(text, codexSyntheticBlockPatterns)
 }
 
 func extractText(content interface{}) string {

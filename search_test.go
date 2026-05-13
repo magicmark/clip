@@ -136,6 +136,28 @@ func TestParseCodexSession(t *testing.T) {
 		},
 		{
 			"type":      "response_item",
+			"timestamp": "2026-05-08T12:00:42Z",
+			"payload": map[string]interface{}{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]interface{}{
+					{"type": "input_text", "text": "# AGENTS.md instructions for /tmp/codex project\n\n<INSTRUCTIONS>\nRepo-only instructions should not appear.\n</INSTRUCTIONS>"},
+				},
+			},
+		},
+		{
+			"type":      "response_item",
+			"timestamp": "2026-05-08T12:00:43Z",
+			"payload": map[string]interface{}{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]interface{}{
+					{"type": "input_text", "text": "<local-command-caveat>Caveat: ignore local command messages.</local-command-caveat>"},
+				},
+			},
+		},
+		{
+			"type":      "response_item",
 			"timestamp": "2026-05-08T12:00:45Z",
 			"payload": map[string]interface{}{
 				"type": "message",
@@ -245,6 +267,9 @@ func TestParseCodexSession(t *testing.T) {
 	gotContent := s.messages[0].content + "\n" + s.messages[1].content
 	for _, unwanted := range []string{
 		"<environment_context>",
+		"# AGENTS.md instructions",
+		"Repo-only instructions",
+		"<local-command-caveat>",
 		"<skill>",
 		"<turn_aborted>",
 		"secret tool output",
@@ -333,6 +358,23 @@ func TestParseClaudeSessionSkipsTaskNotifications(t *testing.T) {
 		},
 		{
 			"type":      "user",
+			"timestamp": "2026-05-08T15:44:30Z",
+			"isMeta":    true,
+			"message": map[string]interface{}{
+				"role":    "user",
+				"content": "<local-command-caveat>Caveat: ignore local command messages.</local-command-caveat>",
+			},
+		},
+		{
+			"type":      "user",
+			"timestamp": "2026-05-08T15:44:40Z",
+			"message": map[string]interface{}{
+				"role":    "user",
+				"content": "<local-command-caveat>Caveat: ignore local command messages.</local-command-caveat>",
+			},
+		},
+		{
+			"type":      "user",
 			"timestamp": "2026-05-08T15:45:00Z",
 			"message": map[string]interface{}{
 				"role":    "user",
@@ -369,7 +411,9 @@ func TestParseClaudeSessionSkipsTaskNotifications(t *testing.T) {
 	for _, m := range s.messages {
 		if strings.Contains(m.content, "<task-notification>") ||
 			strings.Contains(m.content, "a9bba9c59c545eb1d") ||
-			strings.Contains(m.content, "Fetch Yelp PR details") {
+			strings.Contains(m.content, "Fetch Yelp PR details") ||
+			strings.Contains(m.content, "local-command-caveat") ||
+			strings.Contains(m.content, "ignore local command") {
 			t.Fatalf("unexpected task notification in parsed message: %#v", m)
 		}
 	}
@@ -377,6 +421,10 @@ func TestParseClaudeSessionSkipsTaskNotifications(t *testing.T) {
 	matchedIDs, _ := searchLoadedSessions([]session{s}, "a9bba9c59c545eb1d")
 	if len(matchedIDs) != 0 {
 		t.Fatalf("expected task notification id not to be searchable, got %v", matchedIDs)
+	}
+	matchedIDs, _ = searchLoadedSessions([]session{s}, "local-command-caveat")
+	if len(matchedIDs) != 0 {
+		t.Fatalf("expected local command caveat not to be searchable, got %v", matchedIDs)
 	}
 }
 
